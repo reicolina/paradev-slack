@@ -1,0 +1,33 @@
+# Slack app manifest for HTTP mode (serverless or any host with a public HTTPS URL).
+# Replace https://YOUR-HOST with the URL your app is served at.
+display_information:
+  name: ParaDev
+  description: Send a Slack message to a ParaDev workspace and put an AI agent on it.
+  background_color: "#1f1b2e"
+features:
+  bot_user:
+    display_name: ParaDev
+    always_online: false
+  app_home:
+    home_tab_enabled: false
+    messages_tab_enabled: true
+    messages_tab_read_only_enabled: true
+  shortcuts:
+    - name: Send to ParaDev
+      type: message
+      callback_id: send_to_paradev
+      description: Send this message to a ParaDev workspace
+oauth_config:
+  scopes:
+    bot:
+      - commands
+      - chat:write
+      - users:read
+settings:
+  interactivity:
+    is_enabled: true
+    request_url: https://YOUR-HOST/slack/events
+    message_menu_options_url: https://YOUR-HOST/slack/events
+  org_deploy_enabled: false
+  socket_mode_enabled: false
+  token_rotation_enabled: false

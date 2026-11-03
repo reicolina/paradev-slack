@@ -1,0 +1,186 @@
+import assert from 'node:assert/strict';
+import { test } from 'node:test';
+import { registerHandlers } from '../src/app.js';
+import { ParaDev } from '../src/paradev.js';
+import { buildPermalink, buildPrompt } from '../src/prompt.js';
+import { CALLBACK_ID, VIEW_ID, WORKSPACE_ACTION, buildModal } from '../src/views.js';
+
+// Captures Bolt handlers so each one can be called directly.
+function fakeApp() {
+  const h = { shortcut: {}, options: {}, action: {}, view: {} };
+  return {
+    h,
+    shortcut: (id, fn) => (h.shortcut[id] = fn),
+    options: (id, fn) => (h.options[id] = fn),
+    action: (id, fn) => (h.action[id] = fn),
+    view: (id, fn) => (h.view[id] = fn),
+  };
+}
+
+function fakeClient() {
+  const calls = [];
+  const rec = (name, ret = {}) => async (args) => (calls.push([name, args]), ret);
+  return {
+    calls,
+    views: { open: rec('views.open'), update: rec('views.update') },
+    chat: {
+      getPermalink: rec('chat.getPermalink', { permalink: 'https://acme.slack.com/archives/C1/p1700000000000100' }),
+      postMessage: rec('chat.postMessage'),
+    },
+    users: { info: async ({ user }) => ({ user: { profile: { display_name: user === 'UAUTHOR' ? 'Ana' : 'Rei' } } }) },
+  };
+}
+
+function fakeSdk({ online = true } = {}) {
+  const launches = [];
+  return {
+    launches,
+    hosts: { list: async () => [{ id: 'H1', name: 'macbook', online }] },
+    workspaces: {
+      list: async () => [
+        { id: 'W2', name: 'zeta', projectName: 'api', hostId: 'H1' },
+        { id: 'W1', name: 'alpha', projectName: 'web', hostId: 'H1' },
+      ],
+    },
+    agents: {
+      list: async () => [
+        { id: 'cfg-codex', presetId: 'codex', label: 'Codex', order: 1 },
+        { id: 'cfg-claude', presetId: 'claude', label: 'Claude', order: 0 },
+      ],
+      create: async (params, opts) => (launches.push({ ...params, ...opts }), { kind: 'terminal', sessionId: 's1', label: 'Claude' }),
+    },
+  };
+}
+
+const logger = { debug() {}, info() {}, warn() {}, error() {} };
+const shortcut = {
+  type: 'message_action',
+  callback_id: CALLBACK_ID,
+  trigger_id: 'T',
+  user: { id: 'USENDER' },
+  team: { domain: 'acme' },
+  channel: { id: 'C1', name: 'bugs' },
+  message_ts: '1700000000.000100',
+  message: { ts: '1700000000.000100', user: 'UAUTHOR', text: 'Login is broken on Safari' },
+};
+
+function setup(opts = {}) {
+  const app = fakeApp();
+  const sdk = fakeSdk(opts);
+  registerHandlers(app, { paradev: new ParaDev(sdk), allowedUserIds: opts.allowed || [] });
+  return { app, sdk, client: fakeClient() };
+}
+
+function submission(openedView, { workspace = 'W1|H1', agentBlock = 'agent:default', agent = 'claude', context = '' } = {}) {
+  return {
+    ...openedView,
+    state: {
+      values: {
+        workspace: { [WORKSPACE_ACTION]: { selected_option: { value: workspace, text: { text: 'alpha · web · macbook' } } } },
+        [agentBlock]: { agent_select: { selected_option: { value: agent, text: { text: 'Claude' } } } },
+        context: { context_input: { value: context } },
+      },
+    },
+  };
+}
+
+test('permalink: top-level and thread reply', () => {
+  assert.equal(
+    buildPermalink({ teamDomain: 'acme', channelId: 'C1', ts: '1700000000.000100' }),
+    'https://acme.slack.com/archives/C1/p1700000000000100',
+  );
+  assert.equal(
+    buildPermalink({ teamDomain: 'acme', channelId: 'C1', ts: '1700000000.000200', threadTs: '1700000000.000100' }),
+    'https://acme.slack.com/archives/C1/p1700000000000200?thread_ts=1700000000.000100&cid=C1',
+  );
+});
+
+test('prompt includes link, author, text and optional context', () => {
+  const p = buildPrompt({ permalink: 'L', authorName: 'Ana', channelName: 'bugs', messageText: 'a\nb', context: ' fix it ', senderName: 'Rei' });
+  assert.match(p, /Slack message: L/);
+  assert.match(p, /Posted by: Ana in #bugs/);
+  assert.match(p, /> a\n> b/);
+  assert.match(p, /Context from Rei:\nfix it/);
+  assert.doesNotMatch(buildPrompt({ permalink: 'L', senderName: 'Rei' }), /Context from/);
+});
+
+test('modal preselects the default harness', () => {
+  const v = buildModal({ agents: [{ value: 'codex', label: 'Codex' }, { value: 'claude', label: 'Claude' }], defaultAgent: 'claude', metadata: '{}' });
+  const agentBlock = v.blocks.find((b) => b.block_id?.startsWith('agent:'));
+  assert.equal(agentBlock.element.initial_option.value, 'claude');
+});
+
+test('end to end: shortcut -> search -> pick workspace -> submit launches the agent', async () => {
+  const { app, sdk, client } = setup();
+  let acked = 0;
+  const ack = async (r) => ((acked += 1), r);
+
+  await app.h.shortcut[CALLBACK_ID]({ shortcut, ack, client, logger });
+  const opened = client.calls.find(([n]) => n === 'views.open')[1].view;
+  assert.equal(opened.callback_id, VIEW_ID);
+  assert.equal(JSON.parse(opened.private_metadata).channelId, 'C1');
+
+  let options;
+  await app.h.options[WORKSPACE_ACTION]({ body: { user: { id: 'USENDER' }, value: '' }, ack: async (r) => (options = r), logger });
+  assert.deepEqual(options.options.map((o) => o.value), ['W1|H1', 'W2|H1']);
+
+  const selected = options.options[0];
+  await app.h.action[WORKSPACE_ACTION]({
+    body: { view: { ...opened, id: 'V1', hash: 'h' }, actions: [{ selected_option: selected }] },
+    ack,
+    client,
+    logger,
+  });
+  const updated = client.calls.find(([n]) => n === 'views.update')[1].view;
+  const agentBlock = updated.blocks.find((b) => b.block_id?.startsWith('agent:'));
+  assert.equal(agentBlock.block_id, 'agent:H1');
+  assert.deepEqual(agentBlock.element.options.map((o) => o.value), ['cfg-claude', 'cfg-codex']);
+  assert.equal(agentBlock.element.initial_option.value, 'cfg-claude');
+  assert.equal(updated.blocks.find((b) => b.block_id === 'workspace').element.initial_option.value, 'W1|H1');
+
+  let submitAck;
+  await app.h.view[VIEW_ID]({
+    view: submission(updated, { agentBlock: 'agent:H1', agent: 'cfg-claude', context: 'fix it and open a PR' }),
+    body: { user: { id: 'USENDER' } },
+    ack: async (r) => (submitAck = r),
+    client,
+    logger,
+  });
+  assert.equal(submitAck, undefined, 'plain ack closes the modal');
+  assert.equal(sdk.launches.length, 1);
+  const launch = sdk.launches[0];
+  assert.equal(launch.workspaceId, 'W1');
+  assert.equal(launch.hostId, 'H1');
+  assert.equal(launch.agent, 'cfg-claude');
+  assert.match(launch.prompt, /https:\/\/acme\.slack\.com\/archives\/C1\/p1700000000000100/);
+  assert.match(launch.prompt, /Posted by: Ana in #bugs/);
+  assert.match(launch.prompt, /Context from Rei:\nfix it and open a PR/);
+  const dm = client.calls.find(([n]) => n === 'chat.postMessage')[1];
+  assert.equal(dm.channel, 'USENDER');
+  assert.match(dm.text, /Claude is on it/);
+});
+
+test('submit to an offline host shows an error and launches nothing', async () => {
+  const { app, sdk, client } = setup({ online: false });
+  let submitAck;
+  await app.h.view[VIEW_ID]({
+    view: submission({ private_metadata: JSON.stringify({ channelId: 'C1', ts: '1.2', teamDomain: 'acme' }) }),
+    body: { user: { id: 'USENDER' } },
+    ack: async (r) => (submitAck = r),
+    client,
+    logger,
+  });
+  assert.equal(submitAck.response_action, 'errors');
+  assert.match(submitAck.errors.workspace, /offline/);
+  assert.equal(sdk.launches.length, 0);
+});
+
+test('users outside the allowlist cannot launch', async () => {
+  const { app, sdk, client } = setup({ allowed: ['USOMEONE_ELSE'] });
+  await app.h.shortcut[CALLBACK_ID]({ shortcut, ack: async () => {}, client, logger });
+  assert.match(client.calls[0][1].view.blocks[0].text.text, /not allowed/);
+  let submitAck;
+  await app.h.view[VIEW_ID]({ view: submission({}), body: { user: { id: 'USENDER' } }, ack: async (r) => (submitAck = r), client, logger });
+  assert.equal(submitAck.response_action, 'errors');
+  assert.equal(sdk.launches.length, 0);
+});

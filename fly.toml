@@ -1,0 +1,10 @@
+# Fly.io config for Socket Mode: one always-on machine, no public ports.
+# fly launch --no-deploy --copy-config, then set secrets and fly deploy (see README).
+app = "paradev-slack"
+primary_region = "yyz"
+
+[build]
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
