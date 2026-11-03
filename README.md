@@ -59,7 +59,15 @@ You need: a ParaDev account with at least one host, permission to create Slack a
 - **API key:** ParaDev desktop app → **Settings → API Keys** → **Create API Key** (`sk_live_…`).
 - **Organization ID:** `superset org list --json` (or the dashboard).
 
-The API key grants full access to your ParaDev organization, so set `ALLOWED_SLACK_USER_IDS` to the Slack user IDs that may use the shortcut (Slack profile → ⋯ → **Copy member ID**).
+### Who can send jobs
+
+The API key can launch agents on every host in your ParaDev organization, so the app fails closed:
+
+- Only the Slack member IDs in `ALLOWED_SLACK_USER_IDS` can use it (Slack profile → ⋯ → **Copy member ID**). For a personal install, put just your own ID.
+- The app refuses to start while that list is empty. `ALLOW_ANY_SLACK_USER=true` opts out, and is only sensible when the whole Slack workspace may use your key.
+- Slack shows the shortcut to everyone in the workspace (it cannot be hidden per user), but anyone else gets "not allowed" and never sees your hosts or workspaces. Every step (opening the form, host and workspace lists, harness lookup, submit) checks the list.
+- Requests are verified as coming from Slack: the signing secret in HTTP mode, the app-level token in Socket Mode.
+- Keep yourself the only collaborator on the Slack app, since collaborators can read its tokens.
 
 ### 3. Configure and run
 
@@ -76,7 +84,8 @@ npm run dev
 | `SLACK_APP_TOKEN` | Socket Mode | `xapp-…`. When set, the app uses Socket Mode; when empty, it serves HTTP on `PORT`. |
 | `PARADEV_API_KEY` | yes | `sk_live_…` |
 | `PARADEV_ORGANIZATION_ID` | yes | |
-| `ALLOWED_SLACK_USER_IDS` | recommended | Comma-separated. Empty means anyone in the Slack workspace. |
+| `ALLOWED_SLACK_USER_IDS` | yes | Comma-separated Slack member IDs allowed to send jobs. |
+| `ALLOW_ANY_SLACK_USER` | no | `true` lets everyone in the Slack workspace use the app instead. |
 | `DEFAULT_AGENT` | no | Preset preselected in the picker. Default `claude`. |
 | `PORT` | no | HTTP mode only. Default `3000`. |
 | `LOG_LEVEL` | no | `debug`, `info`, `warn`, `error` |

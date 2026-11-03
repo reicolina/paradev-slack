@@ -109,10 +109,15 @@ async function stillExists(paradev, choice, logger) {
 /**
  * Register the shortcut, options, action and view handlers on a Bolt app.
  * @param {import('@slack/bolt').App} app
- * @param {{ paradev: import('./paradev.js').ParaDev, defaultAgent?: string, allowedUserIds?: string[] }} deps
+ * Access fails closed: only `allowedUserIds` can use the app, and an empty list allows no one
+ * unless `allowAnyone` is set.
+ * @param {{ paradev: import('./paradev.js').ParaDev, defaultAgent?: string, allowedUserIds?: string[], allowAnyone?: boolean }} deps
  */
-export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowedUserIds = [], memory = new ChoiceMemory() }) {
-  const isAllowed = (userId) => allowedUserIds.length === 0 || allowedUserIds.includes(userId);
+export function registerHandlers(
+  app,
+  { paradev, defaultAgent = 'claude', allowedUserIds = [], allowAnyone = false, memory = new ChoiceMemory() },
+) {
+  const isAllowed = (userId) => Boolean(userId) && (allowAnyone || allowedUserIds.includes(userId));
 
   // 1. "..." on a message -> Send to ParaDev
   app.shortcut(CALLBACK_ID, async ({ shortcut, ack, client, logger }) => {
@@ -193,6 +198,7 @@ export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowe
   // 4. Host chosen -> reset the workspace picker to that host and load its harnesses
   app.action(HOST_ACTION, async ({ body, ack, client, logger }) => {
     await ack();
+    if (!isAllowed(body.user?.id)) return;
     const view = body.view;
     const selectedHost = body.actions?.[0]?.selected_option;
     const hostId = validId(selectedHost?.value);

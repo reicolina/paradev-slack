@@ -25,14 +25,23 @@ const allowedUserIds = (env.ALLOWED_SLACK_USER_IDS || '')
   .map((s) => s.trim())
   .filter(Boolean);
 
-if (!allowedUserIds.length) {
-  console.warn('ALLOWED_SLACK_USER_IDS is empty: anyone in the Slack workspace can launch agents with your ParaDev key.');
+// Fail closed: the ParaDev key can launch agents on every host in the org, so the app
+// will not start without a list of who may use it.
+const allowAnyone = env.ALLOW_ANY_SLACK_USER === 'true';
+if (!allowedUserIds.length && !allowAnyone) {
+  console.error(
+    'ALLOWED_SLACK_USER_IDS is empty. Set it to the Slack member IDs allowed to send jobs ' +
+      '(or ALLOW_ANY_SLACK_USER=true to let everyone in the Slack workspace use your ParaDev key).',
+  );
+  process.exit(1);
 }
+if (allowAnyone) console.warn('ALLOW_ANY_SLACK_USER=true: anyone in the Slack workspace can launch agents with your ParaDev key.');
 
 registerHandlers(app, {
   paradev: ParaDev.fromEnv(env),
   defaultAgent: env.DEFAULT_AGENT || 'claude',
   allowedUserIds,
+  allowAnyone,
 });
 
 await app.start(socketMode ? undefined : Number(env.PORT || 3000));

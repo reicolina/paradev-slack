@@ -80,7 +80,7 @@ function setup(opts = {}) {
   const app = fakeApp();
   const sdk = fakeSdk(opts);
   const memory = opts.memory || new ChoiceMemory();
-  registerHandlers(app, { paradev: new ParaDev(sdk), allowedUserIds: opts.allowed || [], memory });
+  registerHandlers(app, { paradev: new ParaDev(sdk), allowedUserIds: opts.allowed || ['USENDER'], allowAnyone: opts.allowAnyone, memory });
   return { app, sdk, memory, client: fakeClient(opts) };
 }
 
@@ -140,7 +140,7 @@ test('end to end: shortcut -> host -> workspace -> submit launches the agent', a
 
   const selectedHost = hosts.options[0];
   await app.h.action[HOST_ACTION]({
-    body: { view: { ...opened, id: 'V1', hash: 'h' }, actions: [{ selected_option: selectedHost }] },
+    body: { user: { id: 'USENDER' }, view: { ...opened, id: 'V1', hash: 'h' }, actions: [{ selected_option: selectedHost }] },
     ack,
     client,
     logger,
@@ -299,4 +299,25 @@ test('no remembered choice leaves the modal on its defaults', async () => {
   const { app, client } = setup();
   await app.h.shortcut[CALLBACK_ID]({ shortcut, ack: async () => {}, client, logger });
   assert.equal(prefilled(client), undefined);
+});
+
+test('an empty allowlist denies everyone, at every step', async () => {
+  const { app, sdk, client } = setup({ allowed: [] });
+  await app.h.shortcut[CALLBACK_ID]({ shortcut, ack: async () => {}, client, logger });
+  assert.match(client.calls[0][1].view.blocks[0].text.text, /not allowed/);
+
+  let hosts;
+  await app.h.options[HOST_ACTION]({ body: { user: { id: 'USENDER' }, value: '' }, ack: async (r) => (hosts = r), logger });
+  assert.deepEqual(hosts.options, []);
+  let workspaces;
+  await app.h.options[WORKSPACE_ACTION]({ body: { user: { id: 'USENDER' }, value: '' }, ack: async (r) => (workspaces = r), logger });
+  assert.deepEqual(workspaces.options, []);
+
+  await app.h.action[HOST_ACTION]({ body: { user: { id: 'USENDER' }, view: {}, actions: [{ selected_option: { value: 'H1' } }] }, ack: async () => {}, client, logger });
+  assert.ok(!client.calls.some(([n]) => n === 'views.update'), 'no host details for a denied user');
+
+  let submitAck;
+  await app.h.view[VIEW_ID]({ view: submission({}), body: { user: { id: 'USENDER' } }, ack: async (r) => (submitAck = r), client, logger });
+  assert.equal(submitAck.response_action, 'errors');
+  assert.equal(sdk.launches.length, 0);
 });
