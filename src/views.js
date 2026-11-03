@@ -49,8 +49,9 @@ export function findValue(values, prefix, actionId) {
  * @param {string} [p.preview] the message text, shown read-only
  * @param {string} [p.agentNote] small note under the harness picker
  * @param {object} [p.selectedHost] option to keep selected in the host picker
+ * @param {object} [p.selectedWorkspace] option to preselect in the workspace picker
  */
-export function buildModal({ agents, defaultAgent, hostId, metadata, preview, agentNote, selectedHost }) {
+export function buildModal({ agents, defaultAgent, hostId, metadata, preview, agentNote, selectedHost, selectedWorkspace }) {
   const options = agents.slice(0, 100).map((a) => option(a.value, a.label));
   const initial =
     options.find((o) => o.value === defaultAgent) ||
@@ -88,6 +89,7 @@ export function buildModal({ agents, defaultAgent, hostId, metadata, preview, ag
         action_id: WORKSPACE_ACTION,
         placeholder: plain(hostId ? 'Search workspaces on this host' : 'Search workspaces on all hosts'),
         min_query_length: 0,
+        ...(selectedWorkspace ? { initial_option: selectedWorkspace } : {}),
       },
     },
     {

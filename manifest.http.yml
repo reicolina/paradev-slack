@@ -23,6 +23,8 @@ oauth_config:
       - commands
       - chat:write
       - users:read
+      - im:write
+      - im:history
 settings:
   interactivity:
     is_enabled: true

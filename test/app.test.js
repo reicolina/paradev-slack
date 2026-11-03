@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { registerHandlers } from '../src/app.js';
+import { ChoiceMemory } from '../src/memory.js';
 import { ParaDev } from '../src/paradev.js';
 import { buildPermalink, buildPrompt } from '../src/prompt.js';
 import { CALLBACK_ID, HOST_ACTION, VIEW_ID, WORKSPACE_ACTION, buildModal } from '../src/views.js';
@@ -17,12 +18,16 @@ function fakeApp() {
   };
 }
 
-function fakeClient() {
+function fakeClient({ dmHistory = [] } = {}) {
   const calls = [];
   const rec = (name, ret = {}) => async (args) => (calls.push([name, args]), ret);
   return {
     calls,
-    views: { open: rec('views.open'), update: rec('views.update') },
+    views: { open: rec('views.open', { view: { id: 'V1', hash: 'h0' } }), update: rec('views.update') },
+    conversations: {
+      open: rec('conversations.open', { channel: { id: 'D1' } }),
+      history: rec('conversations.history', { messages: dmHistory }),
+    },
     chat: {
       getPermalink: rec('chat.getPermalink', { permalink: 'https://acme.slack.com/archives/C1/p1700000000000100' }),
       postMessage: rec('chat.postMessage'),
@@ -74,8 +79,9 @@ const shortcut = {
 function setup(opts = {}) {
   const app = fakeApp();
   const sdk = fakeSdk(opts);
-  registerHandlers(app, { paradev: new ParaDev(sdk), allowedUserIds: opts.allowed || [] });
-  return { app, sdk, client: fakeClient() };
+  const memory = opts.memory || new ChoiceMemory();
+  registerHandlers(app, { paradev: new ParaDev(sdk), allowedUserIds: opts.allowed || [], memory });
+  return { app, sdk, memory, client: fakeClient(opts) };
 }
 
 function submission(openedView, { host = 'H1', workspace = 'W1|H1', agentBlock = 'agent:default', agent = 'claude', context = '' } = {}) {
@@ -222,4 +228,75 @@ test('users outside the allowlist cannot launch', async () => {
   await app.h.view[VIEW_ID]({ view: submission({}), body: { user: { id: 'USENDER' } }, ack: async (r) => (submitAck = r), client, logger });
   assert.equal(submitAck.response_action, 'errors');
   assert.equal(sdk.launches.length, 0);
+});
+
+const remembered = {
+  hostId: 'H1',
+  hostLabel: 'macbook',
+  workspaceValue: 'W2|H1',
+  workspaceLabel: 'zeta · api',
+  agentValue: 'cfg-codex',
+  agentLabel: 'Codex',
+};
+
+function prefilled(client) {
+  const update = client.calls.find(([n]) => n === 'views.update');
+  if (!update) return undefined;
+  const [, { view, view_id, hash }] = update;
+  const block = (id) => view.blocks.find((b) => b.block_id === id || b.block_id?.startsWith(`${id}:`));
+  return {
+    view_id,
+    hash,
+    host: block('host').element.initial_option?.value,
+    workspace: block('workspace').element.initial_option?.value,
+    agent: block('agent').element.initial_option?.value,
+  };
+}
+
+test('submit stores the choice in the DM metadata', async () => {
+  const { app, memory, client } = setup();
+  await app.h.view[VIEW_ID]({
+    view: submission({ private_metadata: JSON.stringify({ channelId: 'C1', ts: '1.2', teamDomain: 'acme' }) }, { agentBlock: 'agent:H1', agent: 'cfg-claude' }),
+    body: { user: { id: 'USENDER' } },
+    ack: async () => {},
+    client,
+    logger,
+  });
+  const dm = client.calls.find(([n]) => n === 'chat.postMessage')[1];
+  assert.equal(dm.metadata.event_type, 'paradev_last_choice');
+  assert.deepEqual(dm.metadata.event_payload, {
+    hostId: 'H1',
+    hostLabel: 'macbook',
+    workspaceValue: 'W1|H1',
+    workspaceLabel: 'alpha · web',
+    agentValue: 'cfg-claude',
+    agentLabel: 'Claude',
+  });
+  assert.deepEqual(memory.cache.get('USENDER'), dm.metadata.event_payload);
+});
+
+test('shortcut prefills host, workspace and harness from the last DM (after a restart)', async () => {
+  const dmHistory = [{ text: 'hi' }, { text: 'sent', metadata: { event_type: 'paradev_last_choice', event_payload: remembered } }];
+  const { app, client } = setup({ dmHistory });
+  await app.h.shortcut[CALLBACK_ID]({ shortcut, ack: async () => {}, client, logger });
+  assert.deepEqual(prefilled(client), { view_id: 'V1', hash: 'h0', host: 'H1', workspace: 'W2|H1', agent: 'cfg-codex' });
+  assert.equal(client.calls.find(([n]) => n === 'conversations.history')[1].include_all_metadata, true);
+});
+
+test('a deleted workspace is not prefilled, the host and harness still are', async () => {
+  const memory = new ChoiceMemory();
+  memory.remember('USENDER', { ...remembered, workspaceValue: 'GONE|H1' });
+  const { app, client } = setup({ memory });
+  await app.h.shortcut[CALLBACK_ID]({ shortcut, ack: async () => {}, client, logger });
+  const p = prefilled(client);
+  assert.equal(p.host, 'H1');
+  assert.equal(p.workspace, undefined);
+  assert.equal(p.agent, 'cfg-codex');
+  assert.ok(!client.calls.some(([n]) => n === 'conversations.history'), 'cache hit skips the DM read');
+});
+
+test('no remembered choice leaves the modal on its defaults', async () => {
+  const { app, client } = setup();
+  await app.h.shortcut[CALLBACK_ID]({ shortcut, ack: async () => {}, client, logger });
+  assert.equal(prefilled(client), undefined);
 });

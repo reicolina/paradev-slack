@@ -9,6 +9,8 @@ Send any Slack message to a [ParaDev](https://paradev.com) workspace and start a
 5. Optionally add context, e.g. "fix this and open a PR".
 6. Click **Send**. The agent starts in that workspace with the message link, author, text and your note. You get a DM when it is on its way.
 
+Next time, the form opens with your last host, workspace and harness already picked. Change any of them, or just add context and send.
+
 Everything else uses ParaDev's defaults (model, effort, etc. come from the agent's configuration on the host).
 
 ## How it works
@@ -22,6 +24,7 @@ Slack ⋯ menu ──► message shortcut ──► this app ──► ParaDev A
 - Hosts come from `hosts.list`; workspaces from ParaDev's cloud index (`workspaces.list`), scoped to the chosen host.
 - Harnesses are loaded from the chosen host (`agents.list`), so the picker matches what that machine has installed.
 - On submit the app calls `agents.create` on that workspace. The host must be online.
+- Your last choice rides along as [message metadata](https://api.slack.com/metadata) on the result DM. The next shortcut reads it back (`im:history`), so it survives restarts and redeploys with no database. A workspace that no longer exists is not preselected.
 
 The prompt the agent gets looks like this:
 
@@ -103,7 +106,7 @@ npm test        # node:test, Slack and ParaDev are faked
 npm run dev     # reloads on change, reads .env
 ```
 
-Code map: `src/app.js` (Slack handlers), `src/views.js` (modal), `src/prompt.js` (what the agent receives), `src/paradev.js` (ParaDev SDK calls), `src/index.js` (startup).
+Code map: `src/app.js` (Slack handlers), `src/views.js` (modal), `src/prompt.js` (what the agent receives), `src/paradev.js` (ParaDev SDK calls), `src/memory.js` (last choice), `src/index.js` (startup).
 
 ## Limitations
 

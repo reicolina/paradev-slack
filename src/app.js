@@ -1,3 +1,4 @@
+import { ChoiceMemory } from './memory.js';
 import { buildPermalink, buildPrompt, truncate } from './prompt.js';
 import {
   AGENT_ACTION,
@@ -72,9 +73,37 @@ function agentOptions(configs) {
   return configs.map((a) => ({ value: a.id, label: a.label || a.presetId, presetId: a.presetId }));
 }
 
-/** The default agent is a preset id; host agents are selected by instance id. */
-function defaultAgentValue(agents, defaultAgent) {
+/** Pick the remembered harness if the host still has it, else the default preset. */
+function defaultAgentValue(agents, defaultAgent, rememberedValue) {
+  if (rememberedValue && agents.some((a) => a.value === rememberedValue)) return rememberedValue;
   return agents.find((a) => a.presetId === defaultAgent)?.value || defaultAgent;
+}
+
+/** A host's harnesses for the picker, or the fallback list with a note explaining why. */
+async function hostAgents(paradev, hostId, logger) {
+  try {
+    const host = await paradev.hostById(hostId);
+    if (host && !host.online) {
+      return { agents: FALLBACK_AGENTS, agentNote: `:warning: *${host.name}* is offline. Start ParaDev on it before sending.` };
+    }
+    const configs = await paradev.agents(hostId);
+    return { agents: configs.length ? agentOptions(configs) : FALLBACK_AGENTS };
+  } catch (err) {
+    logger.warn(`could not load agents for host ${hostId}: ${err.message}`);
+    return { agents: FALLBACK_AGENTS, agentNote: "Could not load this host's harnesses, showing the defaults." };
+  }
+}
+
+/** The remembered workspace option, only if it still exists on that host. */
+async function stillExists(paradev, choice, logger) {
+  try {
+    const rows = await paradev.searchWorkspaces(undefined, choice.hostId);
+    const ws = rows.find(({ ws }) => encodeWorkspaceValue(ws) === choice.workspaceValue);
+    return ws ? option(choice.workspaceValue, choice.workspaceLabel) : undefined;
+  } catch (err) {
+    logger.debug(`could not check remembered workspace: ${err.message}`);
+    return undefined;
+  }
 }
 
 /**
@@ -82,7 +111,7 @@ function defaultAgentValue(agents, defaultAgent) {
  * @param {import('@slack/bolt').App} app
  * @param {{ paradev: import('./paradev.js').ParaDev, defaultAgent?: string, allowedUserIds?: string[] }} deps
  */
-export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowedUserIds = [] }) {
+export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowedUserIds = [], memory = new ChoiceMemory() }) {
   const isAllowed = (userId) => allowedUserIds.length === 0 || allowedUserIds.includes(userId);
 
   // 1. "..." on a message -> Send to ParaDev
@@ -97,16 +126,39 @@ export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowe
     }
     // trigger_id expires in 3s, so open the modal before any ParaDev call.
     const meta = messageMetadata(shortcut);
-    await client.views.open({
+    const metadata = JSON.stringify(meta);
+    const opened = await client.views.open({
       trigger_id: shortcut.trigger_id,
-      view: buildModal({
-        agents: FALLBACK_AGENTS,
-        defaultAgent,
-        metadata: JSON.stringify(meta),
-        preview: meta.text,
-      }),
+      view: buildModal({ agents: FALLBACK_AGENTS, defaultAgent, metadata, preview: meta.text }),
     });
     logger.debug(`opened modal for ${meta.channelId}/${meta.ts}`);
+
+    // Then fill in the user's last host, workspace and harness.
+    const choice = await memory.recall(client, shortcut.user.id, logger);
+    if (!choice || !opened?.view?.id) return;
+    const [{ agents, agentNote }, selectedWorkspace] = await Promise.all([
+      hostAgents(paradev, choice.hostId, logger),
+      stillExists(paradev, choice, logger),
+    ]);
+    try {
+      await client.views.update({
+        view_id: opened.view.id,
+        hash: opened.view.hash,
+        view: buildModal({
+          agents,
+          defaultAgent: defaultAgentValue(agents, defaultAgent, choice.agentValue),
+          hostId: choice.hostId,
+          metadata,
+          preview: meta.text,
+          agentNote,
+          selectedHost: option(choice.hostId, choice.hostLabel),
+          selectedWorkspace,
+        }),
+      });
+    } catch (err) {
+      // hash_conflict: the user already changed something; leave their edits alone.
+      logger.debug(`prefill skipped: ${err.data?.error || err.message}`);
+    }
   });
 
   // 2. Host picker
@@ -146,20 +198,7 @@ export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowe
     const hostId = validId(selectedHost?.value);
     if (!hostId) return;
 
-    let agents = FALLBACK_AGENTS;
-    let agentNote;
-    try {
-      const host = await paradev.hostById(hostId);
-      if (host && !host.online) {
-        agentNote = `:warning: *${host.name}* is offline. Start ParaDev on it before sending.`;
-      } else {
-        const configs = await paradev.agents(hostId);
-        if (configs.length) agents = agentOptions(configs);
-      }
-    } catch (err) {
-      logger.warn(`could not load agents for host ${hostId}: ${err.message}`);
-      agentNote = "Could not load this host's harnesses, showing the defaults.";
-    }
+    const { agents, agentNote } = await hostAgents(paradev, hostId, logger);
 
     try {
       await client.views.update({
@@ -225,6 +264,15 @@ export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowe
 
     const where = host?.name ? `*${wsOption.text.text}* on *${host.name}*` : `*${wsOption.text.text}*`;
     const agentLabel = agentOption?.text?.text || agent;
+    const choice = {
+      hostId,
+      hostLabel: values[HOST_BLOCK][HOST_ACTION].selected_option.text.text,
+      workspaceValue: wsOption.value,
+      workspaceLabel: wsOption.text.text,
+      agentValue: agent,
+      agentLabel,
+    };
+    memory.remember(userId, choice);
     let text;
     try {
       await paradev.launch({ workspaceId, hostId, agent, prompt });
@@ -234,6 +282,7 @@ export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowe
       text = `:x: Could not send <${permalink}|this message> to ${where} with ${agentLabel}: ${err.message}`;
     }
     // Posting to a user ID lands in the app's DM with them.
-    await client.chat.postMessage({ channel: userId, text, unfurl_links: false });
+    // Its metadata is how the next shortcut remembers this choice.
+    await client.chat.postMessage({ channel: userId, text, unfurl_links: false, metadata: memory.metadata(choice) });
   });
 }

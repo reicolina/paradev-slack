@@ -23,6 +23,8 @@ oauth_config:
       - commands   # the message shortcut
       - chat:write # DM you the result
       - users:read # author names in the prompt
+      - im:write   # open your DM to recall your last choice
+      - im:history # read that choice back from the DM
 settings:
   interactivity:
     is_enabled: true
