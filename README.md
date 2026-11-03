@@ -1,30 +1,30 @@
 # ParaDev for Slack
 
-Send any Slack message to a [ParaDev](https://paradev.com) workspace and start an AI agent on it, straight from the message's **⋯ More actions** menu.
+Send any Slack message to a [ParaDev](https://paradev.com) workspace and start an AI agent on it, straight from the message's **⋯ More actions** menu. Everyone uses their own ParaDev account, so a job you send runs as you, on your hosts.
 
 1. On any message, click **⋯** → **Send to ParaDev**.
-2. Pick the ParaDev host (online hosts first, offline ones marked).
-3. Pick a workspace on that host (searchable).
-4. Pick the AI harness (Claude by default, or anything configured on that host: Codex, Gemini, Cursor Agent, …).
-5. Optionally add context, e.g. "fix this and open a PR".
-6. Click **Send**. The agent starts in that workspace with the message link, author, text and your note. You get a DM when it is on its way.
+2. The first time, click **Connect ParaDev** and sign in. The form appears as soon as you are connected.
+3. Pick the ParaDev host (online hosts first, offline ones marked).
+4. Pick a workspace on that host (searchable by name, branch or project).
+5. Pick the AI harness (Claude by default, or anything configured on that host: Codex, Gemini, Cursor Agent, …).
+6. Optionally add context, e.g. "fix this and open a PR".
+7. Click **Send**. The agent starts in that workspace with the message link, author, text and your note. You get a DM when it is on its way.
 
-Next time, the form opens with your last host, workspace and harness already picked. Change any of them, or just add context and send.
-
-Everything else uses ParaDev's defaults (model, effort, etc. come from the agent's configuration on the host).
+Next time, the form opens with your last host, workspace and harness already picked. Everything else uses ParaDev's defaults (model, effort, etc. come from the agent's configuration on the host).
 
 ## How it works
 
 ```
-Slack ⋯ menu ──► message shortcut ──► this app ──► ParaDev API ──► relay ──► your host ──► agent session
-                 (modal: workspace,                (@superset_sh/sdk:
-                  harness, context)                 agents.create)
+Slack ⋯ menu ──► this app ──► ParaDev MCP API (as you) ──► relay ──► your host ──► agent session
+                   │               hosts_list, workspaces_list,
+                   │               agents_list, agents_create
+                   └─► "Connect ParaDev" ──► ParaDev sign-in (OAuth 2.1 + PKCE) ──► /oauth/callback
 ```
 
-- Hosts come from `hosts.list`; workspaces from ParaDev's cloud index (`workspaces.list`), scoped to the chosen host.
-- Harnesses are loaded from the chosen host (`agents.list`), so the picker matches what that machine has installed.
-- On submit the app calls `agents.create` on that workspace. The host must be online.
-- Your last choice rides along as [message metadata](https://api.slack.com/metadata) on the result DM. The next shortcut reads it back (`im:history`), so it survives restarts and redeploys with no database. A workspace that no longer exists is not preselected.
+- **Accounts.** The app registers itself with ParaDev's OAuth server once ([RFC 7591](https://www.rfc-editor.org/rfc/rfc7591)) and signs each Slack user in with the authorization code flow and PKCE. Each user's tokens are stored encrypted (AES-256-GCM), refreshed before they expire, and used only for that user's requests. Nobody can reach anyone else's hosts.
+- **ParaDev calls** go to ParaDev's MCP endpoint (`/mcp`), which is where ParaDev documents OAuth tokens as accepted.
+- **Disconnect** from the app's **Home** tab in Slack. It revokes the token at ParaDev and deletes it here. You can also revoke the app from ParaDev itself.
+- **Your last choice** rides along as [message metadata](https://api.slack.com/metadata) on the result DM, so it survives restarts with no extra storage.
 
 The prompt the agent gets looks like this:
 
@@ -45,83 +45,82 @@ If you have Slack access, open the link above to read the full message and its t
 
 ## Setup
 
-You need: a ParaDev account with at least one host, permission to create Slack apps in your Slack workspace, and Node 20+ (or Docker).
+You need permission to create Slack apps in your Slack workspace, somewhere to run a small always-on container with a public HTTPS URL (the steps below use Fly.io), and Node 20+ or Docker. Each person who uses it needs a ParaDev account with at least one host.
 
 ### 1. Create the Slack app
 
-1. Go to <https://api.slack.com/apps> → **Create New App** → **From a manifest**, pick your workspace, and paste [`manifest.yml`](manifest.yml) (Socket Mode). Use [`manifest.http.yml`](manifest.http.yml) instead if you will serve it over HTTPS.
+1. Go to <https://api.slack.com/apps> → **Create New App** → **From a manifest**, pick your workspace, and paste [`manifest.yml`](manifest.yml) (Socket Mode). Use [`manifest.http.yml`](manifest.http.yml) instead to receive Slack requests over HTTPS.
 2. **Install to Workspace**, then copy the **Bot User OAuth Token** (`xoxb-…`).
 3. **Basic Information** → copy the **Signing Secret**.
 4. Socket Mode only: **Basic Information** → **App-Level Tokens** → generate one with the `connections:write` scope (`xapp-…`).
 
-### 2. Get ParaDev credentials
-
-- **API key:** ParaDev desktop app → **Settings → API Keys** → **Create API Key** (`sk_live_…`).
-- **Organization ID:** `superset org list --json` (or the dashboard).
-
-### Who can send jobs
-
-The API key can launch agents on every host in your ParaDev organization, so the app fails closed:
-
-- Only the Slack member IDs in `ALLOWED_SLACK_USER_IDS` can use it (Slack profile → ⋯ → **Copy member ID**). For a personal install, put just your own ID.
-- The app refuses to start while that list is empty. `ALLOW_ANY_SLACK_USER=true` opts out, and is only sensible when the whole Slack workspace may use your key.
-- Slack shows the shortcut to everyone in the workspace (it cannot be hidden per user), but anyone else gets "not allowed" and never sees your hosts or workspaces. Every step (opening the form, host and workspace lists, harness lookup, submit) checks the list.
-- Requests are verified as coming from Slack: the signing secret in HTTP mode, the app-level token in Socket Mode.
-- Keep yourself the only collaborator on the Slack app, since collaborators can read its tokens.
-
-### 3. Configure and run
+### 2. Deploy (Fly.io)
 
 ```bash
-cp .env.example .env   # fill it in
-npm install
-npm run dev
+fly launch --no-deploy --copy-config --name <your-app-name>
+fly volumes create paradev_slack_data --size 1
+fly secrets set \
+  SLACK_BOT_TOKEN=xoxb-... SLACK_SIGNING_SECRET=... SLACK_APP_TOKEN=xapp-... \
+  PUBLIC_URL=https://<your-app-name>.fly.dev \
+  TOKEN_ENCRYPTION_KEY=$(openssl rand -base64 32)
+fly deploy
+fly scale count 1
 ```
+
+Then open the app's **Home** tab in Slack and click **Connect ParaDev** to check the sign-in works.
+
+Why this shape:
+
+- **Always on.** Slack wants an answer within 3 seconds of a click; serverless cold starts miss that. The app is idle almost all the time and fits in the smallest machine.
+- **A public URL** is needed only for the sign-in callback (`/oauth/callback`) and the health check (`/healthz`). In Socket Mode, Slack traffic itself goes over an outbound WebSocket.
+- **A volume** keeps linked accounts across deploys. Without it everyone would have to connect again after each deploy.
+- **One machine.** The account store is a single file; do not scale out.
+
+Railway, Render or any VPS work the same way with the included `Dockerfile`: give it a public HTTPS URL, a persistent disk at `/data`, and the same variables.
+
+### Configuration
 
 | Variable | Required | |
 | --- | --- | --- |
 | `SLACK_BOT_TOKEN` | yes | `xoxb-…` |
 | `SLACK_SIGNING_SECRET` | yes | |
-| `SLACK_APP_TOKEN` | Socket Mode | `xapp-…`. When set, the app uses Socket Mode; when empty, it serves HTTP on `PORT`. |
-| `PARADEV_API_KEY` | yes | `sk_live_…` |
-| `PARADEV_ORGANIZATION_ID` | yes | |
-| `ALLOWED_SLACK_USER_IDS` | yes | Comma-separated Slack member IDs allowed to send jobs. |
-| `ALLOW_ANY_SLACK_USER` | no | `true` lets everyone in the Slack workspace use the app instead. |
+| `SLACK_APP_TOKEN` | Socket Mode | `xapp-…`. When empty, Slack requests come over HTTP at `PUBLIC_URL/slack/events`. |
+| `PUBLIC_URL` | yes | Public HTTPS URL of the app, without a trailing slash. |
+| `TOKEN_ENCRYPTION_KEY` | yes | 32 random bytes, base64: `openssl rand -base64 32`. Keep it secret and keep it stable: changing it disconnects everyone. |
+| `STORE_PATH` | no | Encrypted account store. Default `./data/store.json` (`/data/store.json` in Docker). |
+| `ALLOWED_SLACK_USER_IDS` | no | Comma-separated Slack member IDs allowed to use the app at all. Empty means anyone in the Slack workspace (each still acts as themselves). |
 | `DEFAULT_AGENT` | no | Preset preselected in the picker. Default `claude`. |
-| `PORT` | no | HTTP mode only. Default `3000`. |
+| `PORT` | no | Default `3000`. |
+| `PARADEV_URL` | no | Default `https://api.superset.sh`. |
 | `LOG_LEVEL` | no | `debug`, `info`, `warn`, `error` |
 
-## Deploying
+### Personal mode (one shared API key)
 
-**Recommended: Socket Mode on a small always-on container (Fly.io).** Socket Mode opens an outbound WebSocket to Slack, so there is no public URL, no TLS setup and no request signing to expose. Slack requires interactive requests to be acknowledged within 3 seconds and modals to open within 3 seconds of the click; an always-on process meets that every time, while serverless cold starts can miss it. The app is idle almost all the time and fits in the smallest machine.
+If only you use it and you would rather not run the sign-in flow, set `PARADEV_API_KEY` (ParaDev desktop app → **Settings → API Keys**) and `PARADEV_ORGANIZATION_ID`. Every allowed Slack user then acts as the key's owner, so `ALLOWED_SLACK_USER_IDS` becomes required and the app will not start without it (`ALLOW_ANY_SLACK_USER=true` is the explicit opt-out). `PUBLIC_URL` and `TOKEN_ENCRYPTION_KEY` are not needed, and Socket Mode works with no public URL at all.
 
-```bash
-fly launch --no-deploy --copy-config --name <your-app-name>
-fly secrets set SLACK_BOT_TOKEN=xoxb-... SLACK_SIGNING_SECRET=... SLACK_APP_TOKEN=xapp-... \
-  PARADEV_API_KEY=sk_live_... PARADEV_ORGANIZATION_ID=... ALLOWED_SLACK_USER_IDS=U0123
-fly deploy
-fly scale count 1   # Socket Mode: run exactly one machine
-```
+## Security
 
-Other options that work the same way (they all run the included `Dockerfile`):
-
-- **Railway / Render background worker:** connect the repo, set the env vars, no port needed.
-- **Any machine you already run**, for example the box that is your ParaDev host: `docker build -t paradev-slack . && docker run -d --restart unless-stopped --env-file .env paradev-slack` or `npm start` under systemd / pm2. Free, but the shortcut stops working when that machine is off.
-- **HTTP mode** (Cloud Run, Render web service, a VPS behind HTTPS): leave `SLACK_APP_TOKEN` empty, use `manifest.http.yml` with your URL, and keep at least one instance warm.
+- Each Slack user's ParaDev access is their own: sign-in state is single-use, expires after 15 minutes, and is bound to the Slack user and workspace that started it.
+- Tokens are encrypted at rest with `TOKEN_ENCRYPTION_KEY` and the store file is written with mode `0600`. Anyone with both the file and the key can act as the linked users, so treat the key like a password.
+- A refresh token ParaDev refuses (revoked, expired) unlinks the user and asks them to connect again.
+- Slack requests are verified (signing secret in HTTP mode, app-level token in Socket Mode).
+- Keep the Slack app's collaborators to people you trust: they can read its tokens.
 
 ## Development
 
 ```bash
-npm test        # node:test, Slack and ParaDev are faked
+npm test        # node:test; Slack and ParaDev are faked
 npm run dev     # reloads on change, reads .env
 ```
 
-Code map: `src/app.js` (Slack handlers), `src/views.js` (modal), `src/prompt.js` (what the agent receives), `src/paradev.js` (ParaDev SDK calls), `src/memory.js` (last choice), `src/index.js` (startup).
+Code map: `src/app.js` (Slack handlers), `src/views.js` (modals, Home tab), `src/accounts.js` (per-user accounts and token refresh), `src/oauth.js` (ParaDev OAuth client), `src/store.js` (encrypted store), `src/routes.js` (callback page), `src/mcp.js` + `src/paradev.js` (ParaDev calls), `src/prompt.js` (what the agent receives), `src/memory.js` (last choice), `src/index.js` (startup and modes).
 
 ## Limitations
 
-- Each install is single-tenant: one Slack app, one ParaDev organization, one API key. Agents run as the owner of that key.
+- One install serves one Slack workspace. People from different ParaDev organizations can share it; each sees their own.
+- A ParaDev sign-in is tied to the organization that was active when the user approved it. To switch, disconnect and connect again.
+- Workspace lists come from the host itself, so pick an online host.
 - The agent gets the message text (up to ~1,800 characters) plus the link. Reading the full thread needs Slack access inside the agent (for example the Slack plugin in ParaDev).
-- `@superset_sh/sdk` is in alpha; the version is pinned.
 
 ## License
 

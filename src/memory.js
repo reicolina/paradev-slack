@@ -24,6 +24,11 @@ export class ChoiceMemory {
     this.cache.set(userId, choice);
   }
 
+  /** Drop the cached choice, e.g. after switching ParaDev accounts. Older DMs are still checked. */
+  forget(userId) {
+    this.cache.delete(userId);
+  }
+
   async recall(client, userId, logger) {
     if (this.cache.has(userId)) return this.cache.get(userId);
     try {

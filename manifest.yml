@@ -1,4 +1,5 @@
-# Slack app manifest for Socket Mode (no public URL needed).
+# Slack app manifest for Socket Mode: Slack traffic goes over an outbound WebSocket.
+# (The app still serves the ParaDev sign-in callback at PUBLIC_URL/oauth/callback.)
 # Create the app at https://api.slack.com/apps -> Create New App -> From a manifest.
 display_information:
   name: ParaDev
@@ -9,7 +10,7 @@ features:
     display_name: ParaDev
     always_online: false
   app_home:
-    home_tab_enabled: false
+    home_tab_enabled: true
     messages_tab_enabled: true
     messages_tab_read_only_enabled: true
   shortcuts:
@@ -26,6 +27,9 @@ oauth_config:
       - im:write   # open your DM to recall your last choice
       - im:history # read that choice back from the DM
 settings:
+  event_subscriptions:
+    bot_events:
+      - app_home_opened
   interactivity:
     is_enabled: true
   org_deploy_enabled: false

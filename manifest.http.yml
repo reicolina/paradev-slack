@@ -9,7 +9,7 @@ features:
     display_name: ParaDev
     always_online: false
   app_home:
-    home_tab_enabled: false
+    home_tab_enabled: true
     messages_tab_enabled: true
     messages_tab_read_only_enabled: true
   shortcuts:
@@ -26,6 +26,10 @@ oauth_config:
       - im:write
       - im:history
 settings:
+  event_subscriptions:
+    request_url: https://YOUR-HOST/slack/events
+    bot_events:
+      - app_home_opened
   interactivity:
     is_enabled: true
     request_url: https://YOUR-HOST/slack/events

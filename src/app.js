@@ -3,6 +3,10 @@ import { buildPermalink, buildPrompt, truncate } from './prompt.js';
 import {
   AGENT_ACTION,
   CALLBACK_ID,
+  CONNECT_ACTION,
+  DISCONNECT_ACTION,
+  connectModal,
+  homeView,
   CONTEXT_ACTION,
   CONTEXT_BLOCK,
   FALLBACK_AGENTS,
@@ -106,49 +110,57 @@ async function stillExists(paradev, choice, logger) {
   }
 }
 
+const teamOf = (body) => body.team?.id || body.user?.team_id || body.team_id || body.view?.team_id;
+
+function notConnectedText(err) {
+  return err?.unauthorized ? `${err.message} Open the ParaDev app's Home tab in Slack to connect.` : undefined;
+}
+
 /**
- * Register the shortcut, options, action and view handlers on a Bolt app.
+ * Register every Slack handler on a Bolt app.
+ *
+ * `accounts` decides which ParaDev account a Slack user acts as: their own (OAuth mode) or a
+ * shared API key (personal mode). Access also fails closed on `allowedUserIds` unless
+ * `allowAnyone` is set.
+ *
+ * Returns `onConnected`, which the OAuth callback route calls when a user finishes signing in.
  * @param {import('@slack/bolt').App} app
- * Access fails closed: only `allowedUserIds` can use the app, and an empty list allows no one
- * unless `allowAnyone` is set.
- * @param {{ paradev: import('./paradev.js').ParaDev, defaultAgent?: string, allowedUserIds?: string[], allowAnyone?: boolean }} deps
+ * @param {{ accounts: import('./accounts.js').OAuthAccounts | import('./accounts.js').ApiKeyAccounts,
+ *   defaultAgent?: string, allowedUserIds?: string[], allowAnyone?: boolean, memory?: ChoiceMemory }} deps
  */
 export function registerHandlers(
   app,
-  { paradev, defaultAgent = 'claude', allowedUserIds = [], allowAnyone = false, memory = new ChoiceMemory() },
+  { accounts, defaultAgent = 'claude', allowedUserIds = [], allowAnyone = false, memory = new ChoiceMemory() },
 ) {
   const isAllowed = (userId) => Boolean(userId) && (allowAnyone || allowedUserIds.includes(userId));
+  const oauth = accounts.mode === 'oauth';
 
-  // 1. "..." on a message -> Send to ParaDev
-  app.shortcut(CALLBACK_ID, async ({ shortcut, ack, client, logger }) => {
-    await ack();
-    if (!isAllowed(shortcut.user.id)) {
-      await client.views.open({
-        trigger_id: shortcut.trigger_id,
-        view: messageView('Send to ParaDev', 'You are not allowed to use this app. Ask its admin to add your Slack user ID.'),
-      });
-      return;
-    }
-    // trigger_id expires in 3s, so open the modal before any ParaDev call.
-    const meta = messageMetadata(shortcut);
+  /** Show the form in an open modal, then fill in the user's last choice. */
+  async function showForm({ client, paradev, viewId, hash, meta, userId, logger }) {
     const metadata = JSON.stringify(meta);
-    const opened = await client.views.open({
-      trigger_id: shortcut.trigger_id,
-      view: buildModal({ agents: FALLBACK_AGENTS, defaultAgent, metadata, preview: meta.text }),
-    });
-    logger.debug(`opened modal for ${meta.channelId}/${meta.ts}`);
+    let current = { id: viewId, hash };
+    if (!hash) {
+      // Replacing the connect modal: no hash, the form replaces whatever is there.
+      const res = await client.views.update({
+        view_id: viewId,
+        view: buildModal({ agents: FALLBACK_AGENTS, defaultAgent, metadata, preview: meta.text }),
+      });
+      current = res?.view || current;
+    }
 
-    // Then fill in the user's last host, workspace and harness.
-    const choice = await memory.recall(client, shortcut.user.id, logger);
-    if (!choice || !opened?.view?.id) return;
+    const choice = await memory.recall(client, userId, logger);
+    if (!choice || !current?.id) return;
+    // A remembered host from another ParaDev account (or a removed one) is skipped.
+    const host = await paradev.hostById(choice.hostId).catch(() => undefined);
+    if (!host) return;
     const [{ agents, agentNote }, selectedWorkspace] = await Promise.all([
       hostAgents(paradev, choice.hostId, logger),
       stillExists(paradev, choice, logger),
     ]);
     try {
       await client.views.update({
-        view_id: opened.view.id,
-        hash: opened.view.hash,
+        view_id: current.id,
+        hash: current.hash,
         view: buildModal({
           agents,
           defaultAgent: defaultAgentValue(agents, defaultAgent, choice.agentValue),
@@ -156,7 +168,7 @@ export function registerHandlers(
           metadata,
           preview: meta.text,
           agentNote,
-          selectedHost: option(choice.hostId, choice.hostLabel),
+          selectedHost: option(choice.hostId, hostOptionLabel(host)),
           selectedWorkspace,
         }),
       });
@@ -164,34 +176,81 @@ export function registerHandlers(
       // hash_conflict: the user already changed something; leave their edits alone.
       logger.debug(`prefill skipped: ${err.data?.error || err.message}`);
     }
+  }
+
+  async function publishHome(client, teamId, userId) {
+    const status = await accounts.status(teamId, userId);
+    const connectUrl = !status.connected && oauth ? (await accounts.connectUrl({ teamId, userId, context: { from: 'home' } })).url : undefined;
+    await client.views.publish({ user_id: userId, view: homeView({ status, connectUrl }) });
+  }
+
+  // 1. "..." on a message -> Send to ParaDev
+  app.shortcut(CALLBACK_ID, async ({ shortcut, ack, client, logger }) => {
+    await ack();
+    const userId = shortcut.user.id;
+    if (!isAllowed(userId)) {
+      await client.views.open({
+        trigger_id: shortcut.trigger_id,
+        view: messageView('Send to ParaDev', 'You are not allowed to use this app. Ask its admin to add your Slack user ID.'),
+      });
+      return;
+    }
+    // trigger_id expires in 3s, so open a modal before any ParaDev call.
+    const meta = messageMetadata(shortcut);
+    const metadata = JSON.stringify(meta);
+    const teamId = teamOf(shortcut);
+    const paradev = await accounts.forUser(teamId, userId);
+
+    if (!paradev) {
+      const { url, state } = await accounts.connectUrl({ teamId, userId, context: { meta } });
+      const opened = await client.views.open({ trigger_id: shortcut.trigger_id, view: connectModal({ url, metadata }) });
+      accounts.addContext(state, { viewId: opened?.view?.id });
+      return;
+    }
+
+    const opened = await client.views.open({
+      trigger_id: shortcut.trigger_id,
+      view: buildModal({ agents: FALLBACK_AGENTS, defaultAgent, metadata, preview: meta.text }),
+    });
+    logger.debug(`opened modal for ${meta.channelId}/${meta.ts}`);
+    if (opened?.view?.id) {
+      await showForm({ client, paradev, viewId: opened.view.id, hash: opened.view.hash, meta, userId, logger });
+    }
   });
+
+  // URL buttons still send an action; acknowledge it.
+  app.action(CONNECT_ACTION, async ({ ack }) => ack());
 
   // 2. Host picker
   app.options(HOST_ACTION, async ({ body, ack, logger }) => {
     if (!isAllowed(body.user?.id)) return ack({ options: [] });
+    const paradev = await accounts.forUser(teamOf(body), body.user.id);
+    if (!paradev) return ack({ options: [option(ERROR_VALUE, 'Connect ParaDev first (app Home tab)')] });
     try {
       const hosts = await paradev.searchHosts(body.value?.trim());
       await ack({ options: hosts.slice(0, 100).map((h) => option(h.id, hostOptionLabel(h))) });
     } catch (err) {
       logger.error(`host search failed: ${err.message}`);
-      await ack({ options: [option(ERROR_VALUE, 'Could not reach ParaDev, check the app logs')] });
+      const label = err.unauthorized ? 'Reconnect ParaDev (app Home tab)' : 'Could not reach ParaDev, try again';
+      await ack({ options: [option(ERROR_VALUE, label)] });
     }
   });
 
-  // 3. Workspace picker, scoped to the chosen host when there is one
+  // 3. Workspace picker, scoped to the chosen host
   app.options(WORKSPACE_ACTION, async ({ body, ack, logger }) => {
     if (!isAllowed(body.user?.id)) return ack({ options: [] });
     const hostId = validId(body.view?.state?.values?.[HOST_BLOCK]?.[HOST_ACTION]?.selected_option?.value);
+    if (!hostId) return ack({ options: [] });
+    const paradev = await accounts.forUser(teamOf(body), body.user.id);
+    if (!paradev) return ack({ options: [] });
     try {
       const rows = await paradev.searchWorkspaces(body.value?.trim(), hostId);
       await ack({
-        options: rows
-          .slice(0, 100)
-          .map(({ ws, host }) => option(encodeWorkspaceValue(ws), workspaceOptionLabel(ws, host, !hostId))),
+        options: rows.slice(0, 100).map(({ ws, host }) => option(encodeWorkspaceValue(ws), workspaceOptionLabel(ws, host, false))),
       });
     } catch (err) {
       logger.error(`workspace search failed: ${err.message}`);
-      await ack({ options: [option(ERROR_VALUE, 'Could not reach ParaDev, check the app logs')] });
+      await ack({ options: [option(ERROR_VALUE, err.message.slice(0, 70))] });
     }
   });
 
@@ -203,6 +262,8 @@ export function registerHandlers(
     const selectedHost = body.actions?.[0]?.selected_option;
     const hostId = validId(selectedHost?.value);
     if (!hostId) return;
+    const paradev = await accounts.forUser(teamOf(body), body.user.id);
+    if (!paradev) return;
 
     const { agents, agentNote } = await hostAgents(paradev, hostId, logger);
 
@@ -234,6 +295,8 @@ export function registerHandlers(
     const fail = (block, message) => ack({ response_action: 'errors', errors: { [block]: message } });
 
     if (!isAllowed(userId)) return fail(HOST_BLOCK, 'You are not allowed to use this app.');
+    const paradev = await accounts.forUser(teamOf(body), userId);
+    if (!paradev) return fail(HOST_BLOCK, 'Connect your ParaDev account first (app Home tab).');
 
     const chosenHostId = validId(values[HOST_BLOCK]?.[HOST_ACTION]?.selected_option?.value);
     const wsOption = findValue(values, 'workspace', WORKSPACE_ACTION)?.selected_option;
@@ -285,10 +348,49 @@ export function registerHandlers(
       text = `:rocket: Sent <${permalink}|this message> to ${where}. ${agentLabel} is on it.`;
     } catch (err) {
       logger.error(`launch failed: ${err.message}`);
-      text = `:x: Could not send <${permalink}|this message> to ${where} with ${agentLabel}: ${err.message}`;
+      text = `:x: Could not send <${permalink}|this message> to ${where} with ${agentLabel}: ${notConnectedText(err) || err.message}`;
     }
-    // Posting to a user ID lands in the app's DM with them.
     // Its metadata is how the next shortcut remembers this choice.
     await client.chat.postMessage({ channel: userId, text, unfurl_links: false, metadata: memory.metadata(choice) });
   });
+
+  // 6. App Home: connection status, connect and disconnect
+  app.event('app_home_opened', async ({ event, body, client, logger }) => {
+    if (event.tab !== 'home' || !isAllowed(event.user)) return;
+    try {
+      await publishHome(client, body.team_id || teamOf(body), event.user);
+    } catch (err) {
+      logger.error(`home publish failed: ${err.message}`);
+    }
+  });
+
+  app.action(DISCONNECT_ACTION, async ({ body, ack, client }) => {
+    await ack();
+    if (!oauth) return;
+    const teamId = teamOf(body);
+    await accounts.disconnect(teamId, body.user.id);
+    memory.forget(body.user.id);
+    await publishHome(client, teamId, body.user.id);
+  });
+
+  /** Called by the OAuth callback once a Slack user has linked their ParaDev account. */
+  async function onConnected({ teamId, userId, context, account }) {
+    const client = app.client;
+    const logger = app.logger || console;
+    memory.forget(userId);
+    const who = account.email || account.name || 'your ParaDev account';
+    await client.chat
+      .postMessage({ channel: userId, text: `:white_check_mark: Connected to ParaDev as *${who}*. Messages you send run as you.` })
+      .catch((err) => logger.warn(`connect DM failed: ${err.message}`));
+    await publishHome(client, teamId, userId).catch((err) => logger.debug(`home publish failed: ${err.message}`));
+    // If the user started from a message, turn the waiting connect modal into the form.
+    if (context?.viewId && context.meta) {
+      const paradev = await accounts.forUser(teamId, userId);
+      await showForm({ client, paradev, viewId: context.viewId, meta: context.meta, userId, logger }).catch((err) =>
+        logger.debug(`could not swap the connect modal for the form: ${err.data?.error || err.message}`),
+      );
+    }
+  }
+
+  return { onConnected };
 }

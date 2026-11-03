@@ -87,7 +87,7 @@ export function buildModal({ agents, defaultAgent, hostId, metadata, preview, ag
       element: {
         type: 'external_select',
         action_id: WORKSPACE_ACTION,
-        placeholder: plain(hostId ? 'Search workspaces on this host' : 'Search workspaces on all hosts'),
+        placeholder: plain(hostId ? 'Search workspaces on this host' : 'Pick a host first'),
         min_query_length: 0,
         ...(selectedWorkspace ? { initial_option: selectedWorkspace } : {}),
       },
@@ -140,10 +140,13 @@ export function hostOptionLabel(host) {
 
 /** `showHost` is false when the list is already scoped to one host. */
 export function workspaceOptionLabel(ws, host, showHost = true) {
-  if (!showHost) return `${ws.name} · ${ws.projectName}`;
+  // Scratch sessions have no project.
+  const project = ws.projectName || (ws.type === 'session' ? 'session' : '');
+  const base = project ? `${ws.name} · ${project}` : ws.name;
+  if (!showHost) return base;
   const status = host ? (host.online ? '' : ' (offline)') : '';
   const where = host?.name ? ` · ${host.name}` : '';
-  return `${ws.name} · ${ws.projectName}${where}${status}`;
+  return `${base}${where}${status}`;
 }
 
 export function encodeWorkspaceValue(ws) {
@@ -153,6 +156,82 @@ export function encodeWorkspaceValue(ws) {
 export function decodeWorkspaceValue(value) {
   const [workspaceId, hostId] = String(value || '').split('|');
   return { workspaceId, hostId };
+}
+
+export const CONNECT_ACTION = 'connect_paradev';
+export const DISCONNECT_ACTION = 'disconnect_paradev';
+export const CONNECT_VIEW_ID = 'connect_paradev_modal';
+
+function connectButton(url, text = 'Connect ParaDev') {
+  return { type: 'button', action_id: CONNECT_ACTION, text: plain(text), url, style: 'primary' };
+}
+
+/** Shown instead of the form until the user links their own ParaDev account. */
+export function connectModal({ url, metadata, reason }) {
+  return {
+    type: 'modal',
+    callback_id: CONNECT_VIEW_ID,
+    title: plain('Send to ParaDev'),
+    close: plain('Cancel'),
+    private_metadata: metadata,
+    blocks: [
+      {
+        type: 'section',
+        text: {
+          type: 'mrkdwn',
+          text: `${reason ? `${reason}\n\n` : ''}Connect your ParaDev account first. Jobs you send run as you, on your own hosts.`,
+        },
+      },
+      { type: 'actions', elements: [connectButton(url)] },
+      {
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: 'Sign in opens in your browser. Keep this window open: the form appears here once you are connected.' }],
+      },
+    ],
+  };
+}
+
+/** App Home tab: connection status and connect / disconnect. */
+export function homeView({ status, connectUrl }) {
+  const blocks = [{ type: 'header', text: plain('ParaDev for Slack') }];
+  blocks.push({
+    type: 'section',
+    text: {
+      type: 'mrkdwn',
+      text: 'On any message, open *⋯ More actions* and pick *Send to ParaDev* to start an agent on it in one of your workspaces.',
+    },
+  });
+  if (status.shared) {
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: 'This install uses one shared ParaDev account set by its admin.' }] });
+  } else if (status.connected) {
+    const who = [status.name, status.email && `(${status.email})`].filter(Boolean).join(' ') || 'your ParaDev account';
+    blocks.push(
+      { type: 'section', text: { type: 'mrkdwn', text: `:white_check_mark: Connected as *${who}*.` } },
+      {
+        type: 'actions',
+        elements: [
+          {
+            type: 'button',
+            action_id: DISCONNECT_ACTION,
+            text: plain('Disconnect'),
+            style: 'danger',
+            confirm: {
+              title: plain('Disconnect ParaDev?'),
+              text: { type: 'mrkdwn', text: 'The app forgets your ParaDev sign-in. You can connect again any time.' },
+              confirm: plain('Disconnect'),
+              deny: plain('Cancel'),
+            },
+          },
+        ],
+      },
+    );
+  } else {
+    blocks.push(
+      { type: 'section', text: { type: 'mrkdwn', text: 'Not connected. Connect your ParaDev account to send jobs to your own hosts.' } },
+      { type: 'actions', elements: [connectButton(connectUrl)] },
+    );
+  }
+  return { type: 'home', blocks };
 }
 
 export { option, plain };
