@@ -3,10 +3,11 @@
 Send any Slack message to a [ParaDev](https://paradev.com) workspace and start an AI agent on it, straight from the message's **⋯ More actions** menu.
 
 1. On any message, click **⋯** → **Send to ParaDev**.
-2. Pick a workspace (search across every host in your org).
-3. Pick the AI harness (Claude by default, or anything configured on that workspace's host: Codex, Gemini, Cursor Agent, …).
-4. Optionally add context, e.g. "fix this and open a PR".
-5. Click **Send**. The agent starts in that workspace with the message link, author, text and your note. You get a DM when it is on its way.
+2. Pick the ParaDev host (online hosts first, offline ones marked).
+3. Pick a workspace on that host (searchable).
+4. Pick the AI harness (Claude by default, or anything configured on that host: Codex, Gemini, Cursor Agent, …).
+5. Optionally add context, e.g. "fix this and open a PR".
+6. Click **Send**. The agent starts in that workspace with the message link, author, text and your note. You get a DM when it is on its way.
 
 Everything else uses ParaDev's defaults (model, effort, etc. come from the agent's configuration on the host).
 
@@ -18,8 +19,8 @@ Slack ⋯ menu ──► message shortcut ──► this app ──► ParaDev A
                   harness, context)                 agents.create)
 ```
 
-- Workspaces come from ParaDev's cloud index (`workspaces.list`), with offline hosts marked.
-- Harnesses are loaded from the chosen workspace's host (`agents.list`), so the picker matches what that machine has installed.
+- Hosts come from `hosts.list`; workspaces from ParaDev's cloud index (`workspaces.list`), scoped to the chosen host.
+- Harnesses are loaded from the chosen host (`agents.list`), so the picker matches what that machine has installed.
 - On submit the app calls `agents.create` on that workspace. The host must be online.
 
 The prompt the agent gets looks like this:

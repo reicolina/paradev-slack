@@ -25,7 +25,8 @@ export class ParaDev {
 
   async hosts() {
     if (Date.now() - this.hostCache.at < HOST_CACHE_MS) return this.hostCache.hosts;
-    const hosts = await this.sdk.hosts.list();
+    // `online` is typed boolean; accept the CLI's "yes"/"no" form too.
+    const hosts = (await this.sdk.hosts.list()).map((h) => ({ ...h, online: h.online === true || h.online === 'yes' }));
     this.hostCache = { at: Date.now(), hosts };
     return hosts;
   }
@@ -34,10 +35,19 @@ export class ParaDev {
     return (await this.hosts()).find((h) => h.id === hostId);
   }
 
-  /** Workspaces matching a search, online hosts first, then by name. */
-  async searchWorkspaces(search) {
+  /** Hosts matching a search, online first, then by name. */
+  async searchHosts(search) {
+    const q = (search || '').toLowerCase();
+    return (await this.hosts())
+      .filter((h) => !q || h.name.toLowerCase().includes(q))
+      .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
+  }
+
+  /** Workspaces matching a search, optionally on one host; online hosts first, then by name. */
+  async searchWorkspaces(search, hostId) {
+    const params = { ...(search ? { search } : {}), ...(hostId ? { hostId } : {}) };
     const [workspaces, hosts] = await Promise.all([
-      this.sdk.workspaces.list(search ? { search } : {}),
+      this.sdk.workspaces.list(params),
       this.hosts(),
     ]);
     const byId = new Map(hosts.map((h) => [h.id, h]));

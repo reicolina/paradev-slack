@@ -6,15 +6,22 @@ import {
   CONTEXT_BLOCK,
   FALLBACK_AGENTS,
   VIEW_ID,
+  HOST_ACTION,
+  HOST_BLOCK,
   WORKSPACE_ACTION,
-  WORKSPACE_BLOCK,
   buildModal,
   decodeWorkspaceValue,
   encodeWorkspaceValue,
+  findValue,
+  hostOptionLabel,
   option,
   plain,
   workspaceOptionLabel,
 } from './views.js';
+
+// Value of the "could not reach ParaDev" option, so it can never be submitted as a real id.
+const ERROR_VALUE = 'error';
+const validId = (id) => (id && id !== ERROR_VALUE ? id : undefined);
 
 /** Fields of the original message carried from the shortcut to the submission. */
 function messageMetadata(shortcut) {
@@ -102,33 +109,47 @@ export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowe
     logger.debug(`opened modal for ${meta.channelId}/${meta.ts}`);
   });
 
-  // 2. Workspace picker search
-  app.options(WORKSPACE_ACTION, async ({ body, ack, logger }) => {
+  // 2. Host picker
+  app.options(HOST_ACTION, async ({ body, ack, logger }) => {
     if (!isAllowed(body.user?.id)) return ack({ options: [] });
     try {
-      const rows = await paradev.searchWorkspaces(body.value?.trim());
-      await ack({
-        options: rows.slice(0, 100).map(({ ws, host }) => option(encodeWorkspaceValue(ws), workspaceOptionLabel(ws, host))),
-      });
+      const hosts = await paradev.searchHosts(body.value?.trim());
+      await ack({ options: hosts.slice(0, 100).map((h) => option(h.id, hostOptionLabel(h))) });
     } catch (err) {
-      logger.error(`workspace search failed: ${err.message}`);
-      await ack({ options: [option('error|', 'Could not reach ParaDev, check the app logs')] });
+      logger.error(`host search failed: ${err.message}`);
+      await ack({ options: [option(ERROR_VALUE, 'Could not reach ParaDev, check the app logs')] });
     }
   });
 
-  // 3. Workspace chosen -> load that host's harnesses
-  app.action(WORKSPACE_ACTION, async ({ body, ack, client, logger }) => {
+  // 3. Workspace picker, scoped to the chosen host when there is one
+  app.options(WORKSPACE_ACTION, async ({ body, ack, logger }) => {
+    if (!isAllowed(body.user?.id)) return ack({ options: [] });
+    const hostId = validId(body.view?.state?.values?.[HOST_BLOCK]?.[HOST_ACTION]?.selected_option?.value);
+    try {
+      const rows = await paradev.searchWorkspaces(body.value?.trim(), hostId);
+      await ack({
+        options: rows
+          .slice(0, 100)
+          .map(({ ws, host }) => option(encodeWorkspaceValue(ws), workspaceOptionLabel(ws, host, !hostId))),
+      });
+    } catch (err) {
+      logger.error(`workspace search failed: ${err.message}`);
+      await ack({ options: [option(ERROR_VALUE, 'Could not reach ParaDev, check the app logs')] });
+    }
+  });
+
+  // 4. Host chosen -> reset the workspace picker to that host and load its harnesses
+  app.action(HOST_ACTION, async ({ body, ack, client, logger }) => {
     await ack();
     const view = body.view;
-    const selectedWorkspace = body.actions?.[0]?.selected_option;
-    const { hostId } = decodeWorkspaceValue(selectedWorkspace?.value);
+    const selectedHost = body.actions?.[0]?.selected_option;
+    const hostId = validId(selectedHost?.value);
     if (!hostId) return;
 
     let agents = FALLBACK_AGENTS;
     let agentNote;
-    let host;
     try {
-      host = await paradev.hostById(hostId);
+      const host = await paradev.hostById(hostId);
       if (host && !host.online) {
         agentNote = `:warning: *${host.name}* is offline. Start ParaDev on it before sending.`;
       } else {
@@ -137,7 +158,7 @@ export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowe
       }
     } catch (err) {
       logger.warn(`could not load agents for host ${hostId}: ${err.message}`);
-      agentNote = 'Could not load this host\'s harnesses, showing the defaults.';
+      agentNote = "Could not load this host's harnesses, showing the defaults.";
     }
 
     try {
@@ -151,7 +172,7 @@ export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowe
           metadata: view.private_metadata,
           preview: JSON.parse(view.private_metadata).text,
           agentNote,
-          selectedWorkspace,
+          selectedHost,
         }),
       });
     } catch (err) {
@@ -160,30 +181,29 @@ export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowe
     }
   });
 
-  // 4. Submit -> start the agent in the workspace
+  // 5. Submit -> start the agent in the workspace
   app.view(VIEW_ID, async ({ view, body, ack, client, logger }) => {
     const userId = body.user.id;
-    if (!isAllowed(userId)) {
-      return ack({ response_action: 'errors', errors: { [WORKSPACE_BLOCK]: 'You are not allowed to use this app.' } });
-    }
+    const values = view.state?.values || {};
+    const wsBlock = Object.keys(values).find((k) => k.startsWith('workspace')) || HOST_BLOCK;
+    const fail = (block, message) => ack({ response_action: 'errors', errors: { [block]: message } });
 
-    const values = view.state.values;
-    const wsOption = values[WORKSPACE_BLOCK]?.[WORKSPACE_ACTION]?.selected_option;
+    if (!isAllowed(userId)) return fail(HOST_BLOCK, 'You are not allowed to use this app.');
+
+    const chosenHostId = validId(values[HOST_BLOCK]?.[HOST_ACTION]?.selected_option?.value);
+    const wsOption = findValue(values, 'workspace', WORKSPACE_ACTION)?.selected_option;
     const { workspaceId, hostId } = decodeWorkspaceValue(wsOption?.value);
-    if (!workspaceId || !hostId) {
-      return ack({ response_action: 'errors', errors: { [WORKSPACE_BLOCK]: 'Pick a workspace.' } });
-    }
-    const agentBlock = Object.keys(values).find((k) => k.startsWith('agent:'));
-    const agentOption = values[agentBlock]?.[AGENT_ACTION]?.selected_option;
+    if (!chosenHostId) return fail(HOST_BLOCK, 'Pick a host.');
+    if (!validId(workspaceId) || !hostId) return fail(wsBlock, 'Pick a workspace.');
+    if (hostId !== chosenHostId) return fail(wsBlock, 'That workspace is on another host. Pick it again.');
+
+    const agentOption = findValue(values, 'agent', AGENT_ACTION)?.selected_option;
     const agent = agentOption?.value || defaultAgent;
     const context = values[CONTEXT_BLOCK]?.[CONTEXT_ACTION]?.value || '';
 
     const host = await paradev.hostById(hostId).catch(() => undefined);
     if (host && !host.online) {
-      return ack({
-        response_action: 'errors',
-        errors: { [WORKSPACE_BLOCK]: `${host.name} is offline. Start ParaDev on it, or pick another workspace.` },
-      });
+      return fail(HOST_BLOCK, `${host.name} is offline. Start ParaDev on it, or pick another host.`);
     }
     await ack();
 
@@ -203,15 +223,15 @@ export function registerHandlers(app, { paradev, defaultAgent = 'claude', allowe
       senderName,
     });
 
-    const wsLabel = wsOption.text.text;
+    const where = host?.name ? `*${wsOption.text.text}* on *${host.name}*` : `*${wsOption.text.text}*`;
     const agentLabel = agentOption?.text?.text || agent;
     let text;
     try {
       await paradev.launch({ workspaceId, hostId, agent, prompt });
-      text = `:rocket: Sent <${permalink}|this message> to *${wsLabel}*. ${agentLabel} is on it.`;
+      text = `:rocket: Sent <${permalink}|this message> to ${where}. ${agentLabel} is on it.`;
     } catch (err) {
       logger.error(`launch failed: ${err.message}`);
-      text = `:x: Could not send <${permalink}|this message> to *${wsLabel}* with ${agentLabel}: ${err.message}`;
+      text = `:x: Could not send <${permalink}|this message> to ${where} with ${agentLabel}: ${err.message}`;
     }
     // Posting to a user ID lands in the app's DM with them.
     await client.chat.postMessage({ channel: userId, text, unfurl_links: false });

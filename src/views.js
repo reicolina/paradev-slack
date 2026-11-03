@@ -1,6 +1,7 @@
 export const CALLBACK_ID = 'send_to_paradev';
 export const VIEW_ID = 'send_to_paradev_modal';
-export const WORKSPACE_BLOCK = 'workspace';
+export const HOST_BLOCK = 'host';
+export const HOST_ACTION = 'host_select';
 export const WORKSPACE_ACTION = 'workspace_select';
 export const AGENT_ACTION = 'agent_select';
 export const CONTEXT_BLOCK = 'context';
@@ -24,9 +25,19 @@ function option(value, label) {
   return { text: plain(label), value };
 }
 
-/** Block ids change with the agent list so Slack applies the new initial_option. */
+// Block ids change with the host so Slack drops the old selection and applies the new initial_option.
 export function agentBlockId(hostId) {
   return `agent:${hostId || 'default'}`;
+}
+
+export function workspaceBlockId(hostId) {
+  return `workspace:${hostId || 'any'}`;
+}
+
+/** Find a block's value when its id carries a suffix, e.g. `workspace:<hostId>`. */
+export function findValue(values, prefix, actionId) {
+  const key = Object.keys(values || {}).find((k) => k === prefix || k.startsWith(`${prefix}:`));
+  return key ? values[key]?.[actionId] : undefined;
 }
 
 /**
@@ -37,9 +48,9 @@ export function agentBlockId(hostId) {
  * @param {string} p.metadata JSON string carried to the submission
  * @param {string} [p.preview] the message text, shown read-only
  * @param {string} [p.agentNote] small note under the harness picker
- * @param {object} [p.selectedWorkspace] option to keep selected in the workspace picker
+ * @param {object} [p.selectedHost] option to keep selected in the host picker
  */
-export function buildModal({ agents, defaultAgent, hostId, metadata, preview, agentNote, selectedWorkspace }) {
+export function buildModal({ agents, defaultAgent, hostId, metadata, preview, agentNote, selectedHost }) {
   const options = agents.slice(0, 100).map((a) => option(a.value, a.label));
   const initial =
     options.find((o) => o.value === defaultAgent) ||
@@ -57,15 +68,26 @@ export function buildModal({ agents, defaultAgent, hostId, metadata, preview, ag
   blocks.push(
     {
       type: 'input',
-      block_id: WORKSPACE_BLOCK,
+      block_id: HOST_BLOCK,
       dispatch_action: true,
-      label: plain('ParaDev workspace'),
+      label: plain('ParaDev host'),
+      element: {
+        type: 'external_select',
+        action_id: HOST_ACTION,
+        placeholder: plain('Pick a host'),
+        min_query_length: 0,
+        ...(selectedHost ? { initial_option: selectedHost } : {}),
+      },
+    },
+    {
+      type: 'input',
+      block_id: workspaceBlockId(hostId),
+      label: plain('Workspace'),
       element: {
         type: 'external_select',
         action_id: WORKSPACE_ACTION,
-        placeholder: plain('Search workspaces'),
+        placeholder: plain(hostId ? 'Search workspaces on this host' : 'Search workspaces on all hosts'),
         min_query_length: 0,
-        ...(selectedWorkspace ? { initial_option: selectedWorkspace } : {}),
       },
     },
     {
@@ -110,7 +132,13 @@ export function buildModal({ agents, defaultAgent, hostId, metadata, preview, ag
   };
 }
 
-export function workspaceOptionLabel(ws, host) {
+export function hostOptionLabel(host) {
+  return `${host.name}${host.online ? '' : ' (offline)'}`;
+}
+
+/** `showHost` is false when the list is already scoped to one host. */
+export function workspaceOptionLabel(ws, host, showHost = true) {
+  if (!showHost) return `${ws.name} · ${ws.projectName}`;
   const status = host ? (host.online ? '' : ' (offline)') : '';
   const where = host?.name ? ` · ${host.name}` : '';
   return `${ws.name} · ${ws.projectName}${where}${status}`;

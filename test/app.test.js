@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { registerHandlers } from '../src/app.js';
 import { ParaDev } from '../src/paradev.js';
 import { buildPermalink, buildPrompt } from '../src/prompt.js';
-import { CALLBACK_ID, VIEW_ID, WORKSPACE_ACTION, buildModal } from '../src/views.js';
+import { CALLBACK_ID, HOST_ACTION, VIEW_ID, WORKSPACE_ACTION, buildModal } from '../src/views.js';
 
 // Captures Bolt handlers so each one can be called directly.
 function fakeApp() {
@@ -35,12 +35,19 @@ function fakeSdk({ online = true } = {}) {
   const launches = [];
   return {
     launches,
-    hosts: { list: async () => [{ id: 'H1', name: 'macbook', online }] },
-    workspaces: {
+    hosts: {
       list: async () => [
-        { id: 'W2', name: 'zeta', projectName: 'api', hostId: 'H1' },
-        { id: 'W1', name: 'alpha', projectName: 'web', hostId: 'H1' },
+        { id: 'H2', name: 'mac-mini', online: 'no' },
+        { id: 'H1', name: 'macbook', online },
       ],
+    },
+    workspaces: {
+      list: async ({ hostId } = {}) =>
+        [
+          { id: 'W2', name: 'zeta', projectName: 'api', hostId: 'H1' },
+          { id: 'W1', name: 'alpha', projectName: 'web', hostId: 'H1' },
+          { id: 'W3', name: 'beta', projectName: 'web', hostId: 'H2' },
+        ].filter((w) => !hostId || w.hostId === hostId),
     },
     agents: {
       list: async () => [
@@ -71,12 +78,13 @@ function setup(opts = {}) {
   return { app, sdk, client: fakeClient() };
 }
 
-function submission(openedView, { workspace = 'W1|H1', agentBlock = 'agent:default', agent = 'claude', context = '' } = {}) {
+function submission(openedView, { host = 'H1', workspace = 'W1|H1', agentBlock = 'agent:default', agent = 'claude', context = '' } = {}) {
   return {
     ...openedView,
     state: {
       values: {
-        workspace: { [WORKSPACE_ACTION]: { selected_option: { value: workspace, text: { text: 'alpha · web · macbook' } } } },
+        host: { [HOST_ACTION]: { selected_option: { value: host, text: { text: 'macbook' } } } },
+        [`workspace:${host}`]: { [WORKSPACE_ACTION]: { selected_option: { value: workspace, text: { text: 'alpha · web' } } } },
         [agentBlock]: { agent_select: { selected_option: { value: agent, text: { text: 'Claude' } } } },
         context: { context_input: { value: context } },
       },
@@ -110,33 +118,42 @@ test('modal preselects the default harness', () => {
   assert.equal(agentBlock.element.initial_option.value, 'claude');
 });
 
-test('end to end: shortcut -> search -> pick workspace -> submit launches the agent', async () => {
+test('end to end: shortcut -> host -> workspace -> submit launches the agent', async () => {
   const { app, sdk, client } = setup();
-  let acked = 0;
-  const ack = async (r) => ((acked += 1), r);
+  const ack = async (r) => r;
 
   await app.h.shortcut[CALLBACK_ID]({ shortcut, ack, client, logger });
   const opened = client.calls.find(([n]) => n === 'views.open')[1].view;
   assert.equal(opened.callback_id, VIEW_ID);
   assert.equal(JSON.parse(opened.private_metadata).channelId, 'C1');
+  assert.deepEqual(opened.blocks.filter((b) => b.type === 'input').map((b) => b.block_id), ['host', 'workspace:any', 'agent:default', 'context']);
 
-  let options;
-  await app.h.options[WORKSPACE_ACTION]({ body: { user: { id: 'USENDER' }, value: '' }, ack: async (r) => (options = r), logger });
-  assert.deepEqual(options.options.map((o) => o.value), ['W1|H1', 'W2|H1']);
+  let hosts;
+  await app.h.options[HOST_ACTION]({ body: { user: { id: 'USENDER' }, value: '' }, ack: async (r) => (hosts = r), logger });
+  assert.deepEqual(hosts.options.map((o) => [o.value, o.text.text]), [['H1', 'macbook'], ['H2', 'mac-mini (offline)']]);
 
-  const selected = options.options[0];
-  await app.h.action[WORKSPACE_ACTION]({
-    body: { view: { ...opened, id: 'V1', hash: 'h' }, actions: [{ selected_option: selected }] },
+  const selectedHost = hosts.options[0];
+  await app.h.action[HOST_ACTION]({
+    body: { view: { ...opened, id: 'V1', hash: 'h' }, actions: [{ selected_option: selectedHost }] },
     ack,
     client,
     logger,
   });
   const updated = client.calls.find(([n]) => n === 'views.update')[1].view;
+  assert.equal(updated.blocks.find((b) => b.block_id === 'host').element.initial_option.value, 'H1');
+  assert.ok(updated.blocks.some((b) => b.block_id === 'workspace:H1'), 'workspace picker resets for the new host');
   const agentBlock = updated.blocks.find((b) => b.block_id?.startsWith('agent:'));
   assert.equal(agentBlock.block_id, 'agent:H1');
   assert.deepEqual(agentBlock.element.options.map((o) => o.value), ['cfg-claude', 'cfg-codex']);
   assert.equal(agentBlock.element.initial_option.value, 'cfg-claude');
-  assert.equal(updated.blocks.find((b) => b.block_id === 'workspace').element.initial_option.value, 'W1|H1');
+
+  let workspaces;
+  await app.h.options[WORKSPACE_ACTION]({
+    body: { user: { id: 'USENDER' }, value: '', view: { state: { values: { host: { [HOST_ACTION]: { selected_option: selectedHost } } } } } },
+    ack: async (r) => (workspaces = r),
+    logger,
+  });
+  assert.deepEqual(workspaces.options.map((o) => [o.value, o.text.text]), [['W1|H1', 'alpha · web'], ['W2|H1', 'zeta · api']]);
 
   let submitAck;
   await app.h.view[VIEW_ID]({
@@ -157,7 +174,29 @@ test('end to end: shortcut -> search -> pick workspace -> submit launches the ag
   assert.match(launch.prompt, /Context from Rei:\nfix it and open a PR/);
   const dm = client.calls.find(([n]) => n === 'chat.postMessage')[1];
   assert.equal(dm.channel, 'USENDER');
-  assert.match(dm.text, /Claude is on it/);
+  assert.match(dm.text, /\*alpha · web\* on \*macbook\*\. Claude is on it/);
+});
+
+test('without a host, the workspace picker lists every host and labels them', async () => {
+  const { app } = setup();
+  let workspaces;
+  await app.h.options[WORKSPACE_ACTION]({ body: { user: { id: 'USENDER' }, value: '' }, ack: async (r) => (workspaces = r), logger });
+  assert.deepEqual(workspaces.options.map((o) => o.text.text), ['alpha · web · macbook', 'zeta · api · macbook', 'beta · web · mac-mini (offline)']);
+});
+
+test('submit rejects a missing host and a workspace from another host', async () => {
+  const { app, sdk, client } = setup();
+  const meta = JSON.stringify({ channelId: 'C1', ts: '1.2', teamDomain: 'acme' });
+  let submitAck;
+  const run = (view) => app.h.view[VIEW_ID]({ view, body: { user: { id: 'USENDER' } }, ack: async (r) => (submitAck = r), client, logger });
+
+  await run({ private_metadata: meta, state: { values: {} } });
+  assert.deepEqual(submitAck.errors, { host: 'Pick a host.' });
+
+  const v = submission({ private_metadata: meta }, { host: 'H1', workspace: 'W3|H2' });
+  await run(v);
+  assert.match(submitAck.errors['workspace:H1'], /another host/);
+  assert.equal(sdk.launches.length, 0);
 });
 
 test('submit to an offline host shows an error and launches nothing', async () => {
@@ -171,7 +210,7 @@ test('submit to an offline host shows an error and launches nothing', async () =
     logger,
   });
   assert.equal(submitAck.response_action, 'errors');
-  assert.match(submitAck.errors.workspace, /offline/);
+  assert.match(submitAck.errors.host, /offline/);
   assert.equal(sdk.launches.length, 0);
 });
 
