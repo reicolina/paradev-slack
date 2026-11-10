@@ -2,13 +2,13 @@ export const CHOICE_EVENT = 'paradev_last_choice';
 const HISTORY_LIMIT = 20;
 
 /**
- * Remembers each user's last host, workspace and harness.
+ * Remembers each user’s last host, project and harness.
  *
  * The source of truth is Slack itself: every result DM carries the choice as message
  * metadata, so it survives restarts and redeploys without a database. An in-memory
  * cache avoids re-reading the DM on every shortcut.
  *
- * Choice shape: { hostId, hostLabel, workspaceValue, workspaceLabel, agentValue, agentLabel }
+ * Choice shape: { hostId, hostLabel, projectValue, projectLabel, agentValue, agentLabel }
  */
 export class ChoiceMemory {
   constructor() {

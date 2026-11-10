@@ -1,5 +1,5 @@
 import { ChoiceMemory } from './memory.js';
-import { buildPermalink, buildPrompt, truncate } from './prompt.js';
+import { branchName, buildPermalink, buildPrompt, truncate, workspaceName } from './prompt.js';
 import {
   AGENT_ACTION,
   CALLBACK_ID,
@@ -13,15 +13,15 @@ import {
   VIEW_ID,
   HOST_ACTION,
   HOST_BLOCK,
-  WORKSPACE_ACTION,
+  NO_PROJECT,
+  NO_PROJECT_LABEL,
+  PROJECT_ACTION,
   buildModal,
-  decodeWorkspaceValue,
-  encodeWorkspaceValue,
   findValue,
   hostOptionLabel,
   option,
   plain,
-  workspaceOptionLabel,
+  projectOptionLabel,
 } from './views.js';
 
 // Value of the "could not reach ParaDev" option, so it can never be submitted as a real id.
@@ -98,14 +98,16 @@ async function hostAgents(paradev, hostId, logger) {
   }
 }
 
-/** The remembered workspace option, only if it still exists on that host. */
+/** The remembered project option, only if that project is still on the host. */
 async function stillExists(paradev, choice, logger) {
+  if (!choice.projectValue) return undefined;
+  if (choice.projectValue === NO_PROJECT) return option(NO_PROJECT, NO_PROJECT_LABEL);
   try {
-    const rows = await paradev.searchWorkspaces(undefined, choice.hostId);
-    const ws = rows.find(({ ws }) => encodeWorkspaceValue(ws) === choice.workspaceValue);
-    return ws ? option(choice.workspaceValue, choice.workspaceLabel) : undefined;
+    const projects = await paradev.searchProjects(undefined, choice.hostId);
+    const project = projects.find((p) => p.id === choice.projectValue);
+    return project ? option(project.id, projectOptionLabel(project)) : undefined;
   } catch (err) {
-    logger.debug(`could not check remembered workspace: ${err.message}`);
+    logger.debug(`could not check remembered project: ${err.message}`);
     return undefined;
   }
 }
@@ -153,7 +155,7 @@ export function registerHandlers(
     // A remembered host from another ParaDev account (or a removed one) is skipped.
     const host = await paradev.hostById(choice.hostId).catch(() => undefined);
     if (!host) return;
-    const [{ agents, agentNote }, selectedWorkspace] = await Promise.all([
+    const [{ agents, agentNote }, selectedProject] = await Promise.all([
       hostAgents(paradev, choice.hostId, logger),
       stillExists(paradev, choice, logger),
     ]);
@@ -169,7 +171,7 @@ export function registerHandlers(
           preview: meta.text,
           agentNote,
           selectedHost: option(choice.hostId, hostOptionLabel(host)),
-          selectedWorkspace,
+          selectedProject,
         }),
       });
     } catch (err) {
@@ -236,25 +238,26 @@ export function registerHandlers(
     }
   });
 
-  // 3. Workspace picker, scoped to the chosen host
-  app.options(WORKSPACE_ACTION, async ({ body, ack, logger }) => {
+  // 3. Project picker, scoped to the chosen host
+  app.options(PROJECT_ACTION, async ({ body, ack, logger }) => {
     if (!isAllowed(body.user?.id)) return ack({ options: [] });
     const hostId = validId(body.view?.state?.values?.[HOST_BLOCK]?.[HOST_ACTION]?.selected_option?.value);
     if (!hostId) return ack({ options: [] });
     const paradev = await accounts.forUser(teamOf(body), body.user.id);
     if (!paradev) return ack({ options: [] });
     try {
-      const rows = await paradev.searchWorkspaces(body.value?.trim(), hostId);
-      await ack({
-        options: rows.slice(0, 100).map(({ ws, host }) => option(encodeWorkspaceValue(ws), workspaceOptionLabel(ws, host, false))),
-      });
+      const search = body.value?.trim();
+      const projects = await paradev.searchProjects(search, hostId);
+      const options = projects.slice(0, 99).map((p) => option(p.id, projectOptionLabel(p)));
+      if (!search || NO_PROJECT_LABEL.toLowerCase().includes(search.toLowerCase())) options.push(option(NO_PROJECT, NO_PROJECT_LABEL));
+      await ack({ options });
     } catch (err) {
-      logger.error(`workspace search failed: ${err.message}`);
+      logger.error(`project search failed: ${err.message}`);
       await ack({ options: [option(ERROR_VALUE, err.message.slice(0, 70))] });
     }
   });
 
-  // 4. Host chosen -> reset the workspace picker to that host and load its harnesses
+  // 4. Host chosen -> reset the project picker to that host and load its harnesses
   app.action(HOST_ACTION, async ({ body, ack, client, logger }) => {
     await ack();
     if (!isAllowed(body.user?.id)) return;
@@ -287,23 +290,25 @@ export function registerHandlers(
     }
   });
 
-  // 5. Submit -> start the agent in the workspace
+  // 5. Submit -> create a workspace in the project and start the agent in it
   app.view(VIEW_ID, async ({ view, body, ack, client, logger }) => {
     const userId = body.user.id;
     const values = view.state?.values || {};
-    const wsBlock = Object.keys(values).find((k) => k.startsWith('workspace')) || HOST_BLOCK;
+    const projectBlock = Object.keys(values).find((k) => k.startsWith('project')) || HOST_BLOCK;
     const fail = (block, message) => ack({ response_action: 'errors', errors: { [block]: message } });
 
     if (!isAllowed(userId)) return fail(HOST_BLOCK, 'You are not allowed to use this app.');
     const paradev = await accounts.forUser(teamOf(body), userId);
     if (!paradev) return fail(HOST_BLOCK, 'Connect your ParaDev account first (app Home tab).');
 
-    const chosenHostId = validId(values[HOST_BLOCK]?.[HOST_ACTION]?.selected_option?.value);
-    const wsOption = findValue(values, 'workspace', WORKSPACE_ACTION)?.selected_option;
-    const { workspaceId, hostId } = decodeWorkspaceValue(wsOption?.value);
-    if (!chosenHostId) return fail(HOST_BLOCK, 'Pick a host.');
-    if (!validId(workspaceId) || !hostId) return fail(wsBlock, 'Pick a workspace.');
-    if (hostId !== chosenHostId) return fail(wsBlock, 'That workspace is on another host. Pick it again.');
+    const hostId = validId(values[HOST_BLOCK]?.[HOST_ACTION]?.selected_option?.value);
+    const projectOption = findValue(values, 'project', PROJECT_ACTION)?.selected_option;
+    const projectValue = validId(projectOption?.value);
+    if (!hostId) return fail(HOST_BLOCK, 'Pick a host.');
+    if (!projectValue) return fail(projectBlock, 'Pick a project.');
+    // The block id carries the host it was loaded for; a stale pick from another host is refused.
+    if (projectBlock !== `project:${hostId}`) return fail(projectBlock, 'Pick the project again for this host.');
+    const projectId = projectValue === NO_PROJECT ? undefined : projectValue;
 
     const agentOption = findValue(values, 'agent', AGENT_ACTION)?.selected_option;
     const agent = agentOption?.value || defaultAgent;
@@ -331,21 +336,25 @@ export function registerHandlers(
       senderName,
     });
 
-    const where = host?.name ? `*${wsOption.text.text}* on *${host.name}*` : `*${wsOption.text.text}*`;
+    const name = workspaceName({ context, messageText: meta.text });
+    const branch = projectId ? branchName(name) : undefined;
+    const projectLabel = projectOption.text.text;
+    const inProject = projectId ? ` in *${projectLabel}*` : '';
+    const where = `a new workspace *${name}*${inProject}${host?.name ? ` on *${host.name}*` : ''}`;
     const agentLabel = agentOption?.text?.text || agent;
     const choice = {
       hostId,
       hostLabel: values[HOST_BLOCK][HOST_ACTION].selected_option.text.text,
-      workspaceValue: wsOption.value,
-      workspaceLabel: wsOption.text.text,
+      projectValue,
+      projectLabel,
       agentValue: agent,
       agentLabel,
     };
     memory.remember(userId, choice);
     let text;
     try {
-      await paradev.launch({ workspaceId, hostId, agent, prompt });
-      text = `:rocket: Sent <${permalink}|this message> to ${where}. ${agentLabel} is on it.`;
+      await paradev.createWorkspace({ hostId, projectId, name, branch, agent, prompt });
+      text = `:rocket: Sent <${permalink}|this message> to ${where}${branch ? ` (branch \`${branch}\`)` : ''}. ${agentLabel} is starting there.`;
     } catch (err) {
       logger.error(`launch failed: ${err.message}`);
       text = `:x: Could not send <${permalink}|this message> to ${where} with ${agentLabel}: ${notConnectedText(err) || err.message}`;

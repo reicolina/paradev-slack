@@ -1,23 +1,23 @@
 # ParaDev for Slack
 
-Send any Slack message to a [ParaDev](https://paradev.com) workspace and start an AI agent on it, straight from the message's **⋯ More actions** menu. Everyone uses their own ParaDev account, so a job you send runs as you, on your hosts.
+Send any Slack message to [ParaDev](https://paradev.com) and start an AI agent on it in a fresh workspace, straight from the message's **⋯ More actions** menu. Everyone uses their own ParaDev account, so a job you send runs as you, on your hosts.
 
 1. On any message, click **⋯** → **Send to ParaDev**.
 2. The first time, click **Connect ParaDev** and sign in. The form appears as soon as you are connected.
 3. Pick the ParaDev host (online hosts first, offline ones marked).
-4. Pick a workspace on that host (searchable by name, branch or project).
+4. Pick a project on that host (searchable), or **No project** for a scratch session.
 5. Pick the AI harness (Claude by default, or anything configured on that host: Codex, Gemini, Cursor Agent, …).
 6. Optionally add context, e.g. "fix this and open a PR".
-7. Click **Send**. The agent starts in that workspace with the message link, author, text and your note. You get a DM when it is on its way.
+7. Click **Send**. The app creates a new workspace in that project, on its own worktree and a new `slack/…` branch forked from the project's default branch, named after the message. The agent starts there with the message link, author, text and your note. You get a DM when it is on its way.
 
-Next time, the form opens with your last host, workspace and harness already picked. Everything else uses ParaDev's defaults (model, effort, etc. come from the agent's configuration on the host).
+Next time, the form opens with your last host, project and harness already picked. Everything else uses ParaDev's defaults (model, effort, etc. come from the agent's configuration on the host).
 
 ## How it works
 
 ```
 Slack ⋯ menu ──► this app ──► ParaDev MCP API (as you) ──► relay ──► your host ──► agent session
-                   │               hosts_list, workspaces_list,
-                   │               agents_list, agents_create
+                   │               hosts_list, projects_list,
+                   │               agents_list, workspaces_create
                    └─► "Connect ParaDev" ──► ParaDev sign-in (OAuth 2.1 + PKCE) ──► /oauth/callback
 ```
 

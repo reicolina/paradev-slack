@@ -43,28 +43,27 @@ export function fakeClient({ dmHistory = [] } = {}) {
 
 /** ParaDev MCP tools over fake data. `online` controls host H1. */
 export function fakeMcp({ online = true } = {}) {
-  const launches = [];
-  const workspaces = [
-    { id: 'W2', name: 'zeta', projectName: 'api', branch: 'main', hostId: 'H1', lastActivityAt: 1 },
-    { id: 'W1', name: 'alpha', projectName: 'web', branch: 'fix', hostId: 'H1', lastActivityAt: 2 },
-    { id: 'W9', name: 'old', projectName: 'web', branch: 'x', hostId: 'H1', archivedAt: '2026-01-01' },
+  const creates = [];
+  const projects = [
+    { id: 'P2', name: 'website', repoOwner: 'acme', repoName: 'acme.com' },
+    { id: 'P1', name: 'api', repoOwner: 'acme', repoName: 'api' },
   ];
   const tools = {
     hosts_list: () => [
       { id: 'H2', name: 'mac-mini', online: false },
       { id: 'H1', name: 'macbook', online },
     ],
-    workspaces_list: ({ hostId }) => {
-      if (hostId === 'H2') throw Object.assign(new Error('Host is not online'), {});
-      return workspaces.filter((w) => w.hostId === hostId);
+    projects_list: ({ hostId }) => {
+      if (hostId === 'H2') throw new Error('Host is not online');
+      return projects;
     },
     agents_list: () => [
       { id: 'cfg-codex', presetId: 'codex', label: 'Codex', order: 1 },
       { id: 'cfg-claude', presetId: 'claude', label: 'Claude', order: 0 },
     ],
-    agents_create: (args) => (launches.push(args), { kind: 'terminal', sessionId: 's1', label: 'Claude' }),
+    workspaces_create: (args) => (creates.push(args), { id: 'W-new', name: args.name }),
   };
-  return { launches, callTool: async (name, args = {}) => tools[name](args) };
+  return { creates, callTool: async (name, args = {}) => tools[name](args) };
 }
 
 /** Accounts double: everyone listed in `connected` has a ParaDev client. */
@@ -111,14 +110,14 @@ export const shortcut = {
   message: { ts: '1700000000.000100', user: 'UAUTHOR', text: 'Login is broken on Safari' },
 };
 
-export function submission(openedView, { host = 'H1', workspace = 'W1|H1', agentBlock = 'agent:default', agent = 'claude', context = '' } = {}) {
+export function submission(openedView, { host = 'H1', project = 'P1', projectLabel = 'api', projectBlock = `project:${host}`, agentBlock = 'agent:default', agent = 'claude', context = '' } = {}) {
   return {
     ...openedView,
     private_metadata: openedView.private_metadata || JSON.stringify({ channelId: 'C1', ts: '1.2', teamDomain: 'acme' }),
     state: {
       values: {
         host: { host_select: { selected_option: { value: host, text: { text: 'macbook' } } } },
-        [`workspace:${host}`]: { workspace_select: { selected_option: { value: workspace, text: { text: 'alpha · web' } } } },
+        [projectBlock]: { project_select: { selected_option: { value: project, text: { text: projectLabel } } } },
         [agentBlock]: { agent_select: { selected_option: { value: agent, text: { text: 'Claude' } } } },
         context: { context_input: { value: context } },
       },

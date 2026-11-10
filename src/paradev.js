@@ -30,19 +30,14 @@ export class ParaDev {
       .sort((a, b) => Number(b.online) - Number(a.online) || a.name.localeCompare(b.name));
   }
 
-  /**
-   * Active workspaces on a host matching a search on name, branch or project, most recent first.
-   * The list comes from the host itself, so an offline host throws.
-   */
-  async searchWorkspaces(search, hostId) {
+  /** Projects (checked-out repos) on a host matching a search on name or repo, by name. Offline hosts throw. */
+  async searchProjects(search, hostId) {
     if (!hostId) return [];
-    const [workspaces, host] = await Promise.all([this.mcp.callTool('workspaces_list', { hostId }), this.hostById(hostId)]);
+    const projects = await this.mcp.callTool('projects_list', { hostId });
     const q = (search || '').toLowerCase();
-    return workspaces
-      .filter((ws) => !ws.archivedAt && ws.worktreeExists !== false)
-      .filter((ws) => !q || [ws.name, ws.branch, ws.projectName].some((v) => v?.toLowerCase().includes(q)))
-      .sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0) || a.name.localeCompare(b.name))
-      .map((ws) => ({ ws, host }));
+    return projects
+      .filter((p) => !q || [p.name, p.repoName, p.repoOwner].some((v) => v?.toLowerCase().includes(q)))
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
 
   /** Agents configured on a host, in the host's own display order. */
@@ -51,7 +46,17 @@ export class ParaDev {
     return [...list].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
   }
 
-  async launch({ workspaceId, hostId, agent, prompt }) {
-    return this.mcp.callTool('agents_create', { hostId, workspaceId, agent, prompt });
+  /**
+   * Create a workspace on a host and start the agent in it once it is ready.
+   * With a project it gets its own worktree on `branch`, forked from the project's default branch;
+   * without one it is a project-less session.
+   */
+  async createWorkspace({ hostId, projectId, name, branch, agent, prompt }) {
+    return this.mcp.callTool('workspaces_create', {
+      hostId,
+      name,
+      ...(projectId && { projectId, branch }),
+      agents: [{ agent, prompt }],
+    });
   }
 }

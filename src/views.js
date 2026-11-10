@@ -2,7 +2,9 @@ export const CALLBACK_ID = 'send_to_paradev';
 export const VIEW_ID = 'send_to_paradev_modal';
 export const HOST_BLOCK = 'host';
 export const HOST_ACTION = 'host_select';
-export const WORKSPACE_ACTION = 'workspace_select';
+export const PROJECT_ACTION = 'project_select';
+/** Project option for a project-less session (a scratch folder). */
+export const NO_PROJECT = 'none';
 export const AGENT_ACTION = 'agent_select';
 export const CONTEXT_BLOCK = 'context';
 export const CONTEXT_ACTION = 'context_input';
@@ -30,11 +32,11 @@ export function agentBlockId(hostId) {
   return `agent:${hostId || 'default'}`;
 }
 
-export function workspaceBlockId(hostId) {
-  return `workspace:${hostId || 'any'}`;
+export function projectBlockId(hostId) {
+  return `project:${hostId || 'any'}`;
 }
 
-/** Find a block's value when its id carries a suffix, e.g. `workspace:<hostId>`. */
+/** Find a block's value when its id carries a suffix, e.g. `project:<hostId>`. */
 export function findValue(values, prefix, actionId) {
   const key = Object.keys(values || {}).find((k) => k === prefix || k.startsWith(`${prefix}:`));
   return key ? values[key]?.[actionId] : undefined;
@@ -49,9 +51,9 @@ export function findValue(values, prefix, actionId) {
  * @param {string} [p.preview] the message text, shown read-only
  * @param {string} [p.agentNote] small note under the harness picker
  * @param {object} [p.selectedHost] option to keep selected in the host picker
- * @param {object} [p.selectedWorkspace] option to preselect in the workspace picker
+ * @param {object} [p.selectedProject] option to preselect in the project picker
  */
-export function buildModal({ agents, defaultAgent, hostId, metadata, preview, agentNote, selectedHost, selectedWorkspace }) {
+export function buildModal({ agents, defaultAgent, hostId, metadata, preview, agentNote, selectedHost, selectedProject }) {
   const options = agents.slice(0, 100).map((a) => option(a.value, a.label));
   const initial =
     options.find((o) => o.value === defaultAgent) ||
@@ -82,14 +84,15 @@ export function buildModal({ agents, defaultAgent, hostId, metadata, preview, ag
     },
     {
       type: 'input',
-      block_id: workspaceBlockId(hostId),
-      label: plain('Workspace'),
+      block_id: projectBlockId(hostId),
+      label: plain('Project'),
+      hint: plain('A new workspace is created in this project for the agent.'),
       element: {
         type: 'external_select',
-        action_id: WORKSPACE_ACTION,
-        placeholder: plain(hostId ? 'Search workspaces on this host' : 'Pick a host first'),
+        action_id: PROJECT_ACTION,
+        placeholder: plain(hostId ? 'Search projects on this host' : 'Pick a host first'),
         min_query_length: 0,
-        ...(selectedWorkspace ? { initial_option: selectedWorkspace } : {}),
+        ...(selectedProject ? { initial_option: selectedProject } : {}),
       },
     },
     {
@@ -138,25 +141,12 @@ export function hostOptionLabel(host) {
   return `${host.name}${host.online ? '' : ' (offline)'}`;
 }
 
-/** `showHost` is false when the list is already scoped to one host. */
-export function workspaceOptionLabel(ws, host, showHost = true) {
-  // Scratch sessions have no project.
-  const project = ws.projectName || (ws.type === 'session' ? 'session' : '');
-  const base = project ? `${ws.name} · ${project}` : ws.name;
-  if (!showHost) return base;
-  const status = host ? (host.online ? '' : ' (offline)') : '';
-  const where = host?.name ? ` · ${host.name}` : '';
-  return `${base}${where}${status}`;
+export function projectOptionLabel(project) {
+  const repo = project.repoName && project.repoName !== project.name ? ` · ${project.repoName}` : '';
+  return `${project.name}${repo}`;
 }
 
-export function encodeWorkspaceValue(ws) {
-  return `${ws.id}|${ws.hostId}`;
-}
-
-export function decodeWorkspaceValue(value) {
-  const [workspaceId, hostId] = String(value || '').split('|');
-  return { workspaceId, hostId };
-}
+export const NO_PROJECT_LABEL = 'No project (scratch session)';
 
 export const CONNECT_ACTION = 'connect_paradev';
 export const DISCONNECT_ACTION = 'disconnect_paradev';
@@ -198,7 +188,7 @@ export function homeView({ status, connectUrl }) {
     type: 'section',
     text: {
       type: 'mrkdwn',
-      text: 'On any message, open *⋯ More actions* and pick *Send to ParaDev* to start an agent on it in one of your workspaces.',
+      text: 'On any message, open *⋯ More actions* and pick *Send to ParaDev* to start an agent on it in a new workspace in one of your projects.',
     },
   });
   if (status.shared) {
