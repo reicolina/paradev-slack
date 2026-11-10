@@ -38,12 +38,15 @@ export class ParaDevOAuth {
    * @param {string} opts.issuer e.g. https://api.superset.sh
    * @param {string} opts.redirectUri e.g. https://your-app.fly.dev/oauth/callback
    * @param {{get:Function,set:Function}} opts.store
+   * @param {string} [opts.resource] RFC 8707 resource the tokens are for, e.g. https://api.superset.sh/mcp.
+   *   ParaDev only issues a JWT the MCP endpoint accepts when this is sent; without it the token is opaque.
    * @param {string} [opts.clientName]
    * @param {typeof fetch} [opts.fetch]
    */
-  constructor({ issuer, redirectUri, store, clientName = 'ParaDev for Slack', fetch: fetchImpl = globalThis.fetch }) {
+  constructor({ issuer, redirectUri, resource, store, clientName = 'ParaDev for Slack', fetch: fetchImpl = globalThis.fetch }) {
     this.issuer = issuer.replace(/\/$/, '');
     this.redirectUri = redirectUri;
+    this.resource = resource;
     this.store = store;
     this.clientName = clientName;
     this.fetch = fetchImpl;
@@ -98,6 +101,7 @@ export class ParaDevOAuth {
       code_challenge: challenge,
       code_challenge_method: 'S256',
       prompt: 'consent',
+      ...(this.resource && { resource: this.resource }),
     });
     return `${url}?${q}`;
   }
@@ -107,7 +111,7 @@ export class ParaDevOAuth {
     const res = await this.fetch(url, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
-      body: new URLSearchParams({ ...params, client_id: clientId }),
+      body: new URLSearchParams({ ...params, client_id: clientId, ...(this.resource && { resource: this.resource }) }),
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok || !body.access_token) {

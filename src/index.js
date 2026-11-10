@@ -57,7 +57,7 @@ if (personal) {
     fail(err.message);
   }
   const store = new FileStore({ file: env.STORE_PATH || './data/store.json', cipher });
-  oauth = new ParaDevOAuth({ issuer: PARADEV_URL, redirectUri: `${env.PUBLIC_URL.replace(/\/$/, '')}${CALLBACK_PATH}`, store });
+  oauth = new ParaDevOAuth({ issuer: PARADEV_URL, resource: MCP_URL, redirectUri: `${env.PUBLIC_URL.replace(/\/$/, '')}${CALLBACK_PATH}`, store });
   accounts = new OAuthAccounts({ oauth, store, mcpUrl: MCP_URL });
 }
 

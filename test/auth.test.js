@@ -33,6 +33,8 @@ function paradevServer({ refreshError } = {}) {
     [`${ISSUER}/register`]: () => ({ status: 201, json: { client_id: 'client-1' } }),
     [`${ISSUER}/token`]: (_u, init) => {
       const b = Object.fromEntries(init.body);
+      // Like ParaDev: without the MCP resource the token is opaque and /mcp refuses it.
+      if (b.resource !== MCP) return { json: { access_token: 'opaque-token-not-a-jwt', expires_in: 3600 } };
       if (b.grant_type === 'authorization_code') {
         const { challenge, user } = issued.codes.get(b.code);
         const ok = crypto.createHash('sha256').update(b.code_verifier).digest('base64url') === challenge;
@@ -69,7 +71,7 @@ function paradevServer({ refreshError } = {}) {
 function setup(opts) {
   const server = paradevServer(opts);
   const store = opts?.store || new MemoryStore();
-  const oauth = new ParaDevOAuth({ issuer: ISSUER, redirectUri: 'https://app.test/oauth/callback', store, fetch: server.fetch });
+  const oauth = new ParaDevOAuth({ issuer: ISSUER, resource: MCP, redirectUri: 'https://app.test/oauth/callback', store, fetch: server.fetch });
   const accounts = new OAuthAccounts({ oauth, store, mcpUrl: MCP, fetch: server.fetch });
   return { server, store, oauth, accounts };
 }
@@ -102,6 +104,7 @@ test('connect flow: PKCE sign-in links the Slack user, and calls run with their 
   const q = new URL(url).searchParams;
   assert.equal(q.get('code_challenge_method'), 'S256');
   assert.equal(q.get('scope'), 'openid profile email offline_access');
+  assert.equal(q.get('resource'), MCP, 'asks for a token for the MCP endpoint');
 
   const result = await accounts.complete(server.approve(url, 'rei'));
   assert.equal(result.userId, 'U1');
