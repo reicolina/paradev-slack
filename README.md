@@ -2,6 +2,10 @@
 
 Send any Slack message to [ParaDev](https://paradev.com) and start an AI agent on it in a fresh workspace, straight from the message's **⋯ More actions** menu. Everyone uses their own ParaDev account, so a job you send runs as you, on your hosts.
 
+![Send to ParaDev: from a Slack message to an agent opening a PR](docs/demo.gif)
+
+<sub>Illustrative demo with made-up data. [Watch the MP4](docs/demo.mp4).</sub>
+
 1. On any message, click **⋯** → **Send to ParaDev**.
 2. The first time, click **Connect ParaDev** and sign in. The form appears as soon as you are connected.
 3. Pick the ParaDev host (online hosts first, offline ones marked).
